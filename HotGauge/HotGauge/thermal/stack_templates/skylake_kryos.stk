@@ -1,0 +1,91 @@
+/*********************** Materials ***********************/
+material SILICON :
+   thermal conductivity     1.20e-4 ;
+   volumetric heat capacity 1.651e-12 ;
+
+material SOLDER_TIM :
+   thermal conductivity     0.25e-4 ;
+   volumetric heat capacity 1.628e-12 ; // TODO: determine appropriate value
+
+material COPPER :
+   thermal conductivity     3.9e-4 ;
+   volumetric heat capacity 3.376e-12 ;
+
+material THERMAL_GREASE :
+   thermal conductivity     0.04e-4 ;
+   volumetric heat capacity 3.376e-12 ; // TODO: determine appropriate value
+
+material HEATSINK_METAL :
+   thermal conductivity     3.0e-4 ;
+   volumetric heat capacity 3.376e-12 ; // TODO: determine appropriate value
+
+/*
+BEOL could be used in the future
+material BEOL :
+   thermal conductivity     2.25e-6 ;
+   volumetric heat capacity 2.175e-12 ;
+*/
+
+/*********************** Heat Sink ***********************/
+top pluggable heat sink :
+    // Socket is 42.5mm x 42.5mm
+    // Spreader is approx (30mm x 30mm) x 3mm
+	spreader length 30000 , width 30000 , height 3000 ;
+    material COPPER ;
+
+    // Why did they use THERMALCOMPOUND as the spreader?
+	// spreader length 10240 , width 10240 , height 200 ;
+	// material THERMALCOMPOUND ;
+
+	// Plugin parameters are: spreaderX0 (meters)
+    //                        spreaderY0 (meters)
+    //                        waterTemperature (K) 303.15 : effective ambient for desktop
+    //                        waterFlorRate : L/min
+	// Heatsink side is 0.0528 (x axis) x 0.059 (y axis) metres, spreader side 0.03 metres, so the offsets
+	// needed to center the chip underneath the heatsink are
+	// (0.0528 - 0.03) / 2 = 0.0114
+	// (0.059 - 0.03) / 2 = 0.0145
+	plugin "{ICE_DIR}/heatsink_plugin/loaders/FMI/fmi_loader.so", "Cuplex.Cuplex21606_ConstantFlowRate_Interface3DICE 0.0114 0.0145 303.15 {plugin_args}" ;
+
+/*********************** Liquid‐cooled cavity ***********************/
+// N/A
+
+/*********************** Dimensions ***********************/
+dimensions :
+   /*
+      Simple Skylake: 
+         Floorplan Height: 1.4224349 mm
+         Floorplan Width: 2.31580897 mm
+   */
+   chip length {flp_width}, width {flp_height} ;
+   cell length 50, width 50; // TODO: Is this reasonable?
+
+/*********************** Layers ***********************/
+layer SOLDER_LAYER :
+   height 200 ;
+   material SOLDER_TIM ;
+
+/*********************** Dies ***********************/
+die IC :
+   layer  100 SILICON ; // 400
+   layer  80  SILICON ; // 300
+   layer  80  SILICON ; // 220
+   layer  60  SILICON ; // 140
+   layer  40  SILICON ; // 80
+   source 20  SILICON ; // 40
+   layer  20  SILICON ; // 20
+
+/*********************** Stack ***********************/
+stack:
+   layer SOLDER SOLDER_LAYER ;
+   die PROCESSOR_DIE IC floorplan "{flp_file}";
+   // layer    CONN_TO_PCB    BEOL ;
+
+/*********************** Analysis options ***********************/
+solver :
+{solver_config}
+
+/*********************** Output instructions ***********************/
+output :
+   // Specifying a die layer like PROCESSOR_DIE selects the `source` layer of the die
+{output_list}

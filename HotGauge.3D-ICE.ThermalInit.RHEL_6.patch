@@ -1,0 +1,247 @@
+diff --git a/.gitignore b/.gitignore
+index 2b63708..ca2589c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -18,3 +18,6 @@ heatsink_plugin/heatsinks/HS483/HS483.HS483_P14752_VariableFanSpeed_Interface3DI
+ heatsink_plugin/heatsinks/cuplex_kryos_21606/.dummy
+ heatsink_plugin/heatsinks/cuplex_kryos_21606/Cuplex.Cuplex21606_ConstantFlowRate_Interface3DICE/
+ heatsink_plugin/heatsinks/cuplex_kryos_21606/Cuplex.Cuplex21606_VariableFlowRate_Interface3DICE/
++test/
++OpenModelica/
++heatsink_plugin/loaders/FMI/pug*
+diff --git a/README.md b/README.md
+index 11b250d..cb7fddd 100644
+--- a/README.md
++++ b/README.md
+@@ -28,9 +28,11 @@ This was resolved by modifying the part of `bison/stack_description_parser.y` re
+ correct division of the time-slot by the time-step. 
+ 
+ # Compilation
++The following instructions are specific to compiling 3D-ICE on the **HotGauge** development server
++which is running the RHEL 6 distribution of Linux.
++
+ Please refer to the [3D-ICE User Guide](https://eslweb.epfl.ch/3Dice/3D-ICE-User_Guide.pdf) for
+-details on how to compile 3D-ICE. A summary of that document as of September 17, 2021 is included
+-below for your convenience.
++details on how to compile 3D-ICE. 
+ 
+ ## Requirements
+ As per the documentation, 3D-ICE was developed using the following versions of its dependencies
+@@ -48,7 +50,39 @@ The pluggable heat-sink interface has its own set of  dependencies.
+ * Python 3 header files
+ * pkg-config
+ 
++The **HotGauge** development server is able to compile and run 3D-ICE with the following versions of
++the dependencies
++
++* gcc 4.8.0
++* bison 2.4.1
++* flex 2.5.35
++* blas 3.2.1
++* SuperLU 4.3
++* pkg-config 0.23
++
++The **HotGauge** development server requires installation of the following:
++
++* OpenModelica
++* Pugixml
++
++The **HotGauge** development server has not been set up to support the python interface for pluggable heatsinks due to a python
++issue.
++
+ ## Compilation Procedure
++The following instructions get 3D-ICE working on the RHEL 6 **HotGauge** development server. More
++details for each of the components are provided in the subsections below.
++
++`./RHEL6_omc.sh && ./RHEL6_pugixml.sh && pushd heatsink_plugin && make && popd && make`
++
++### Install OpenModelica
++The `./RHEL6_omc.sh` script downloads and installs a specific version of Open Modelica. It
++handles the compilation issues for building `omc` on RHEL6.
++
++### Set Up pugixml library for heatsink plugin
++The `./RHEL6_pugixml.sh` downloads the source ofr the pugixml library and copies it into the
++`heatsink_plugin` directory so that it can be compiled directly alongside the source code.
++
++### Actual Compilation
+ Complete the following steps:
+ 
+ * Compile 3D-ICE using `make`
+diff --git a/RHEL6_omc.sh b/RHEL6_omc.sh
+new file mode 100644
+index 0000000..308680a
+--- /dev/null
++++ b/RHEL6_omc.sh
+@@ -0,0 +1,22 @@
++#!/bin/sh
++git clone https://github.com/OpenModelica/OpenModelica.git --recursive
++
++cd OpenModelica
++# 3D-ICE was developed with this version
++git checkout v1.16.1
++git submodule update --force --init --recursive
++
++# Start the compilation process
++autoconf
++./configure --prefix=/usr/local --disable-modelica3d
++# This will fail on the HotGauge dev machine because asciidoc is not python3 compatible but it makes
++#    the file that allows us to remove the call to asciidoc
++make omc
++# Replace calls to asciidoc with echo
++sed 's:/usr/bin/asciidoc:/bin/echo:g' -i OMCompiler/3rdParty/libzmq/build/CMakeCache.txt
++# Not sure if a clean is requires, but this seems to work
++make clean
++# for some reason, omc fails the first time but works the second time...
++make omc
++# The heatsink plugin also requires omc libraries, so compile that as well
++make omc omlibrary-core
+diff --git a/RHEL6_pugixml.sh b/RHEL6_pugixml.sh
+new file mode 100755
+index 0000000..8f9e087
+--- /dev/null
++++ b/RHEL6_pugixml.sh
+@@ -0,0 +1,7 @@
++#!/bin/sh
++# Pugixml can be easily added to our project and compiled as pard of the source code
++wget https://github.com/zeux/pugixml/releases/download/v1.11/pugixml-1.11.tar.gz
++tar -xvzf pugixml-1.11.tar.gz
++rm pugixml-1.11.tar.gz
++# Copy the required files
++cp pugixml-1.11/src/* heatsink_plugin/loaders/FMI
+diff --git a/heatsink_plugin/Makefile b/heatsink_plugin/Makefile
+index a1b8af4..dd72e43 100644
+--- a/heatsink_plugin/Makefile
++++ b/heatsink_plugin/Makefile
+@@ -46,7 +46,7 @@ include $(3DICE_MAIN)/makefile.def
+ all:
+ 	@echo "\e[31mBuilding plugins\e[0m"
+ 	cd loaders/FMI			; make ;
+-	cd loaders/python		; make ;
++	#cd loaders/python		; make ;
+ 	cd templates/NonlinearExample	; make ;
+ 	cd templates/Modelica		; make ;
+ 	cd templates/C++		; make ;
+diff --git a/heatsink_plugin/heatsinks/HS483/Makefile b/heatsink_plugin/heatsinks/HS483/Makefile
+index 1cac9b4..f99a892 100644
+--- a/heatsink_plugin/heatsinks/HS483/Makefile
++++ b/heatsink_plugin/heatsinks/HS483/Makefile
+@@ -16,7 +16,7 @@ all: $(DUMMY)
+ # This rule makes all OBJs in one go, so we cant't say $(OBJ) : $(SRC)
+ # or make will repeat the rule multiple times. That's why we use a dummy
+ $(DUMMY): $(SRC)
+-	omc buildfmi.mos
++	../../../OpenModelica/build/bin/omc buildfmi.mos
+ 	rm -rf $(OBJ)
+ 	$(foreach O,$(OBJ),unzip -q $(O).fmu -d $(O);)
+ 	$(foreach O,$(OBJ),rm -f $(O).fmu;)
+diff --git a/heatsink_plugin/heatsinks/cuplex_kryos_21606/Makefile b/heatsink_plugin/heatsinks/cuplex_kryos_21606/Makefile
+index b9f3061..68510b7 100644
+--- a/heatsink_plugin/heatsinks/cuplex_kryos_21606/Makefile
++++ b/heatsink_plugin/heatsinks/cuplex_kryos_21606/Makefile
+@@ -16,7 +16,7 @@ all: $(DUMMY)
+ # This rule makes all OBJs in one go, so we cant't say $(OBJ) : $(SRC)
+ # or make will repeat the rule multiple times. That's why we use a dummy
+ $(DUMMY): $(SRC)
+-	omc buildfmi.mos
++	../../../OpenModelica/build/bin/omc buildfmi.mos
+ 	rm -rf $(OBJ)
+ 	$(foreach O,$(OBJ),unzip -q $(O).fmu -d $(O);)
+ 	$(foreach O,$(OBJ),rm -f $(O).fmu;)
+diff --git a/heatsink_plugin/loaders/FMI/Makefile b/heatsink_plugin/loaders/FMI/Makefile
+index 44f7180..1c44c7e 100644
+--- a/heatsink_plugin/loaders/FMI/Makefile
++++ b/heatsink_plugin/loaders/FMI/Makefile
+@@ -2,12 +2,14 @@
+ BIN = fmi_loader.so
+ OBJ = entrypoint.o fmiwrapper.o \
+       libraries/fmi-interface/fmi_interface.o \
+-      libraries/gridmapper/gridmapper.o
++      libraries/gridmapper/gridmapper.o \
++      pugixml.o
++
+ 
+ CXX      = g++
+ CXXFLAGS = -fPIC -O2 -Wall -std=c++11
+ LDFLAGS  = -fPIC -shared -Wl,-soname,$(BIN)
+-LDLIBS   = -lpugixml
++LDLIBS   = -I ./
+ 
+ all: $(BIN)
+ 
+@@ -18,4 +20,4 @@ $(BIN): $(OBJ)
+ 	$(CXX) $(LDFLAGS) -o $(BIN) $(OBJ) $(LDLIBS)
+ 
+ %.o: %.cpp
+-	$(CXX) $(CXXFLAGS) -c $< -o $@
++	$(CXX) $(CXXFLAGS) -c $< -o $@ $(LDLIBS)
+diff --git a/heatsink_plugin/templates/Modelica/Makefile b/heatsink_plugin/templates/Modelica/Makefile
+index 95a0662..824b109 100644
+--- a/heatsink_plugin/templates/Modelica/Makefile
++++ b/heatsink_plugin/templates/Modelica/Makefile
+@@ -12,7 +12,7 @@ all: $(OBJ)
+ $(OBJ): $(SRC)
+ 	# Making an FMI from OpenModelica requires to use its own
+ 	# build system scripting language
+-	omc buildfmi.mos
++	../../../OpenModelica/build/bin/omc buildfmi.mos
+ 	rm -rf $(OBJ)
+ 	unzip -q $(OBJ).fmu -d $(OBJ)
+ 	rm -f $(OBJ_UNDERSCORE)_FMU.* $(OBJ_UNDERSCORE).log $(OBJ).fmu
+diff --git a/heatsink_plugin/templates/NonlinearExample/Makefile b/heatsink_plugin/templates/NonlinearExample/Makefile
+index 0065247..aa90558 100644
+--- a/heatsink_plugin/templates/NonlinearExample/Makefile
++++ b/heatsink_plugin/templates/NonlinearExample/Makefile
+@@ -12,7 +12,7 @@ all: $(OBJ)
+ $(OBJ): $(SRC)
+ 	# Making an FMI from OpenModelica requires to use its own
+ 	# build system scripting language
+-	omc buildfmi.mos
++	../../../OpenModelica/build/bin/omc buildfmi.mos
+ 	rm -rf $(OBJ)
+ 	unzip -q $(OBJ).fmu -d $(OBJ)
+ 	rm -f $(OBJ_UNDERSCORE)_FMU.* $(OBJ_UNDERSCORE).log $(OBJ).fmu
+diff --git a/install-superlu.sh b/install-superlu.sh
+index 945595a..d0e2d89 100755
+--- a/install-superlu.sh
++++ b/install-superlu.sh
+@@ -1,4 +1,7 @@
+ #!/bin/bash
++echo "Warning: SuperLU is already installed on the HotGauge dev machine. Nothing was done. Exiting..."
++exit 0
++
+ # Install SuperLU
+ 
+ echo "Install SuperLU"
+diff --git a/makefile.def b/makefile.def
+index 825b3a6..d1b4ac7 100644
+--- a/makefile.def
++++ b/makefile.def
+@@ -123,11 +123,10 @@ endif
+  ##############################################################################
+ 
+ SLU_VERSION = 4.3
+-SLU_MAIN    = $(3DICE_MAIN)/SuperLU_$(SLU_VERSION)
+-SLU_INCLUDE = $(SLU_MAIN)/SRC
+-SLU_LIB     = $(SLU_MAIN)/lib
+-#SLU_LIBS   = -L$(SLU_LIB) -lsuperlu_$(SLU_VERSION) -lblas
+-SLU_LIBS    = -L$(SLU_LIB) -lsuperlu_$(SLU_VERSION) -L/usr/lib/x86_64-linux-gnu -lblas
++SLU_MAIN    = /usr/lib64/
++SLU_INCLUDE = /usr/include/SuperLU/
++SLU_LIB     = $(SLU_MAIN)
++SLU_LIBS   = -L$(SLU_LIB) -lsuperlu -lblas
+ 
+  #
+  # SystemC variables
+diff --git a/test/plugin/Makefile b/test/plugin/Makefile
+index aa5825e..a7e18ec 100644
+--- a/test/plugin/Makefile
++++ b/test/plugin/Makefile
+@@ -12,7 +12,7 @@ all: $(OBJ)
+ $(OBJ): $(SRC)
+ 	# Making an FMI from OpenModelica requires to use its own
+ 	# build system scripting language
+-	omc buildfmi.mos
++	../../OpenModelica/build/bin/omc buildfmi.mos
+ 	rm -rf $(OBJ)
+ 	unzip -q $(OBJ).fmu -d $(OBJ)
+ 	rm -f $(OBJ_UNDERSCORE)_FMU.* $(OBJ_UNDERSCORE).log $(OBJ).fmu

@@ -1,0 +1,2787 @@
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..11b250d
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,58 @@
++# 3D-ICE-3.0.0
++A modified version of 3D-ICE 3.0.0
++
++[[_TOC_]]
++
++# Modifications
++This version of 3D-ICE has been patched to support the **HotGauge** framework.
++
++## Thermal Stack I/O
++The `TSTACK` output type was added in order to support saving the full thermal stack to a file. This
++thermal-stack file can also be specified as an input to 3D-ICE to initialize the full 3D grid of
++thermal values in the stack. Support is maintained for specifying a single temperature value with
++which to initialize the thermal stack. Additional support is also added to initialize the thermal
++stack to one value and the heatsink to another.
++
++By default, loading a `TSTACK` file will also validate the dimensions of the data in the specified
++input file by validating the appropriate delimiters between cells, rows, and layers, respectively.
++If compiled with the `PERMISSIVE_STACK_LOAD` option defined, then these checks will not occur, and
++only the total number of values will be validated and any combination of whitespace delimiters will
++be accepted
++
++NOTE: This change also necessitated changing the ordering and arguments of some other function calls
++in the main executables, but functionality remains the same.
++
++## Bug-fix: time-step and time-slot
++Some combinations of time-step and time-slot caused simulations to fail for the **HotGauge** team.
++This was resolved by modifying the part of `bison/stack_description_parser.y` responsible for doing
++correct division of the time-slot by the time-step. 
++
++# Compilation
++Please refer to the [3D-ICE User Guide](https://eslweb.epfl.ch/3Dice/3D-ICE-User_Guide.pdf) for
++details on how to compile 3D-ICE. A summary of that document as of September 17, 2021 is included
++below for your convenience.
++
++## Requirements
++As per the documentation, 3D-ICE was developed using the following versions of its dependencies
++
++* gcc 7.4.0
++* bison 3.0.4
++* flex 2.6.4
++* blas 3.7.1
++* SuperLU 4.3
++
++The pluggable heat-sink interface has its own set of  dependencies.
++
++* OpenModelica 1.16.0
++* Pugixml 1.8.1
++* Python 3 header files
++* pkg-config
++
++## Compilation Procedure
++Complete the following steps:
++
++* Compile 3D-ICE using `make`
++* Compile the heatsink-plugin using `make plugin`
++
++The end result of this is the Emulator, Server, and Client executables in the bin/ directory. Run
++`make test` to verify the compilation. Congrats!
+diff --git a/bin/3D-ICE-Emulator.c b/bin/3D-ICE-Emulator.c
+index 132f677..4784dae 100644
+--- a/bin/3D-ICE-Emulator.c
++++ b/bin/3D-ICE-Emulator.c
+@@ -102,43 +102,46 @@ int main(int argc, char** argv)
+ 
+     fprintf (stdout, "done !\n") ;
+ 
+-    // Generate output files
++    // Init thermal data and fill it using the StackDescription
+     ////////////////////////////////////////////////////////////////////////////
+ 
+-    // We use "% " as prefix for matlab compatibility (header will be a comment)
++    fprintf (stdout, "Preparing thermal data ... \n") ; fflush (stdout) ;
+ 
+-    error = generate_output_headers (&output, stkd.Dimensions, (String_t)"% ") ;
++    thermal_data_init (&tdata) ;
++
++    error = thermal_data_build
++
++        (&tdata, &stkd.StackElements, stkd.Dimensions, &analysis) ;
+ 
+     if (error != TDICE_SUCCESS)
+     {
+-        fprintf (stderr, "error in initializing output files \n ");
+-
+         stack_description_destroy (&stkd) ;
+         output_destroy            (&output) ;
+ 
+         return EXIT_FAILURE ;
+     }
+ 
+-    // Init thermal data and fill it using the StackDescription
+-    ////////////////////////////////////////////////////////////////////////////
++    fprintf (stdout, "done !\n") ;
+ 
+-    fprintf (stdout, "Preparing thermal data ... ") ; fflush (stdout) ;
++    // Generate output files
++    ////////////////////////////////////////////////////////////////////////////
+ 
+-    thermal_data_init (&tdata) ;
++    // This must be done after tdata is initialized as it requires information about the TopHeatSink
+ 
+-    error = thermal_data_build
++    // We use "% " as prefix for matlab compatibility (header will be a comment)
+ 
+-        (&tdata, &stkd.StackElements, stkd.Dimensions, &analysis) ;
++    error = generate_output_headers (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink, (String_t)"% ") ;
+ 
+     if (error != TDICE_SUCCESS)
+     {
++        fprintf (stderr, "error in initializing output files \n ");
++
+         stack_description_destroy (&stkd) ;
+         output_destroy            (&output) ;
+ 
+         return EXIT_FAILURE ;
+     }
+ 
+-    fprintf (stdout, "done !\n") ;
+ 
+     // Run the simulation and print the output
+     ////////////////////////////////////////////////////////////////////////////
+@@ -157,7 +160,7 @@ int main(int argc, char** argv)
+ 
+             fflush (stdout) ;
+ 
+-            generate_output (&output, stkd.Dimensions,
++            generate_output (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink,
+                              tdata.Temperatures, tdata.PowerGrid.Sources,
+                              get_simulated_time (&analysis),
+                              TDICE_OUTPUT_INSTANT_STEP) ;
+@@ -167,7 +170,7 @@ int main(int argc, char** argv)
+         {
+             fprintf (stdout, "\n") ;
+ 
+-            generate_output (&output, stkd.Dimensions,
++            generate_output (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink,
+                              tdata.Temperatures, tdata.PowerGrid.Sources,
+                              get_simulated_time (&analysis),
+                              TDICE_OUTPUT_INSTANT_SLOT) ;
+@@ -175,7 +178,7 @@ int main(int argc, char** argv)
+ 
+     } while (sim_result != TDICE_END_OF_SIMULATION && sim_result != TDICE_SOLVER_ERROR) ;
+ 
+-    generate_output (&output, stkd.Dimensions,
++    generate_output (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink,
+                      tdata.Temperatures, tdata.PowerGrid.Sources,
+                      get_simulated_time (&analysis),
+                      TDICE_OUTPUT_INSTANT_FINAL) ;
+diff --git a/bin/3D-ICE-Server.c b/bin/3D-ICE-Server.c
+index f149bf5..ea6c824 100644
+--- a/bin/3D-ICE-Server.c
++++ b/bin/3D-ICE-Server.c
+@@ -165,7 +165,7 @@ int main (int argc, char** argv)
+ 
+             case TDICE_RESET_THERMAL_STATE :
+             {
+-                reset_thermal_state (&tdata, &analysis) ;
++                reset_thermal_state (&tdata, stkd.Dimensions, &analysis) ;
+ 
+                 break ;
+             }
+@@ -294,7 +294,7 @@ int main (int argc, char** argv)
+                 {
+                     Error_t error = generate_output_headers
+ 
+-                        (&output, stkd.Dimensions, (String_t)"% ") ;
++                        (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink, (String_t)"% ") ;
+ 
+                     if (error != TDICE_SUCCESS)
+                     {
+@@ -308,7 +308,7 @@ int main (int argc, char** argv)
+ 
+                 generate_output
+ 
+-                    (&output, stkd.Dimensions,
++                    (&output, stkd.Dimensions, tdata.ThermalGrid.TopHeatSink,
+                      tdata.Temperatures, tdata.PowerGrid.Sources,
+                      get_simulated_time (&analysis), instant) ;
+ 
+diff --git a/bison/stack_description_parser.y b/bison/stack_description_parser.y
+index df1dfbb..a8c526c 100644
+--- a/bison/stack_description_parser.y
++++ b/bison/stack_description_parser.y
+@@ -188,6 +188,7 @@
+ %token TFLPEL                "keyword Tflpel"
+ %token THERMAL               "keyword thermal"
+ %token TMAP                  "keyword Tmap"
++%token TSTACK                "keyword Tstack"
+ %token TO                    "keyword to"
+ %token TOP                   "keyword top"
+ %token TRANSFER              "keyword transfer"
+@@ -393,7 +394,7 @@ topsink_pluggable
+         stkd->TopHeatSink->SpreaderLength     = $8 ;
+         stkd->TopHeatSink->SpreaderWidth      = $11 ;
+         stkd->TopHeatSink->SpreaderHeight     = $14 ;
+-        
++
+         string_copy (&stkd->TopHeatSink->SpreaderMaterial.Id, &$17) ;
+ 
+         Material_t *tmp = material_list_find (&stkd->Materials, &stkd->TopHeatSink->SpreaderMaterial) ;
+@@ -437,7 +438,7 @@ topsink_pluggable
+         stkd->TopHeatSink->SpreaderLength     = $8 ;
+         stkd->TopHeatSink->SpreaderWidth      = $11 ;
+         stkd->TopHeatSink->SpreaderHeight     = $14 ;
+-        
++
+         string_copy (&stkd->TopHeatSink->SpreaderMaterial.Id, &$17) ;
+ 
+         Material_t *tmp = material_list_find (&stkd->Materials, &stkd->TopHeatSink->SpreaderMaterial) ;
+@@ -1536,12 +1537,13 @@ solver
+         analysis->SlotLength   = 1u ; // CHECKME
+ 
+         analysis->InitialTemperature = (Temperature_t) $7;
++        analysis->InitialHeatsinkTemperature = (Temperature_t) $7;
+     }
+ 
+   | SOLVER ':'
+         TRANSIENT STEP DVALUE ',' SLOT DVALUE ';'  // $5 StepTime
+                                                    // $8 SlotTime
+-        INITIAL_ TEMPERATURE DVALUE ';'            // $12 Initial temperature
++        INITIAL_CONDITIONS
+     {
+         if ($8 < $5)
+         {
+@@ -1567,7 +1569,6 @@ solver
+         analysis->AnalysisType       = TDICE_ANALYSIS_TYPE_TRANSIENT ;
+         analysis->StepTime           = (Time_t) $5 ;
+         analysis->SlotTime           = (Time_t) $8 ;
+-        analysis->InitialTemperature = (Temperature_t) $12 ;
+ 
+         // Execute correct division Slot / Step avoiding floating point issues
+         // i.e. both slot and step are mutiplied by 10 until the decimal part
+@@ -1579,16 +1580,75 @@ solver
+         sl_dec = modf (sl, &sl_int) ;
+         st_dec = modf (st, &st_int) ;
+ 
++        // Value at which conversion to integer will overflow and wrap around
++        double MAX_QUANTITY_VALUE = (double) (UINT32_MAX);
++
+         while (sl_dec != 0.0 || st_dec != 0.0)
+         {
+             sl *= 10.0 ; st *= 10.0 ;
+ 
++            // Check if we've shifted as much as we can... This should be at least 9 significant
++            // figures, so, at most, the SlotLength would be off by one-billionth.
++            // This is necessary because doubles can't be trusted to have values that exactly match
++            // the decimal values specified in the stack-description file, which results in shifting
++            // too far and overflowing Quantity_t (uint32_t)
++            if (sl > MAX_QUANTITY_VALUE || st > MAX_QUANTITY_VALUE) {
++               break ;
++            }
++
+             sl_dec = modf (sl, &sl_int) ;
+             st_dec = modf (st, &st_int) ;
++
+         }
+ 
+         analysis->SlotLength   = (Quantity_t) sl_int / (Quantity_t) st_int ;
+ 
++    }
++  ;
++
++INITIAL_CONDITIONS
++
++  : STK_TEMP SINK_TEMP
++  | STK_TEMP_FILE SINK_TEMP
++  | SINGLE_TEMP
++  ;
++
++STK_TEMP
++  : INITIAL_ TEMPERATURE DVALUE ';'          // $3
++    {
++        analysis->InitialTemperature = (Temperature_t) $3 ;
++    }
++  ;
++
++STK_TEMP_FILE
++  : INITIAL_ TEMPERATURE PATH ';' // $3
++    {
++        string_copy (&analysis->InitialTemperatureFile, &$3) ;
++        string_destroy (&$3) ;
++    }
++  ;
++
++SINK_TEMP
++  : INITIAL_ SINK TEMPERATURE DVALUE ';' // $4
++    {
++        analysis->InitialHeatsinkTemperature = (Temperature_t) $4;
++
++        // Cannot be done before as we need the step time and initial temperature
++        if(stkd->TopHeatSink && stkd->TopHeatSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
++        {
++            if(initialize_pluggable_heatsink(stkd->TopHeatSink, analysis)!=TDICE_SUCCESS)
++                YYABORT ;
++        }
++
++    }
++  ;
++
++SINGLE_TEMP
++  : INITIAL_ TEMPERATURE DVALUE ';'          // $3
++    {
++        analysis->InitialTemperature = (Temperature_t) $3 ;
++        analysis->InitialHeatsinkTemperature = (Temperature_t) $3 ;
++
+         // Cannot be done before as we need the step time and initial temperature
+         if(stkd->TopHeatSink && stkd->TopHeatSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
+         {
+@@ -1905,6 +1965,31 @@ inspection_point
+         string_destroy (&$5) ;
+      }
+ 
++  |  TSTACK '(' PATH when ')' ';'
++
++     // $3 Path of the output file
++     // $4 when to generate output for this observation
++
++     {
++        InspectionPoint_t *ipoint = $$ = inspection_point_calloc () ;
++
++        if (ipoint == NULL)
++        {
++            STKERROR ("Malloc inspection point failed") ;
++
++            string_destroy (&$3) ;
++
++            YYABORT ;
++        }
++
++        ipoint->OType        = TDICE_OUTPUT_TYPE_TSTACK ;
++        ipoint->Instant      = $4 ;
++
++        string_copy (&ipoint->FileName, &$3) ;
++
++        string_destroy (&$3) ;
++     }
++
+   |  PMAP '(' IDENTIFIER ',' PATH when ')' ';'
+ 
+      // $3 Identifier of the stack element (must be a die)
+diff --git a/flex/stack_description_scanner.l b/flex/stack_description_scanner.l
+index 4bb9d27..b6ea1bb 100644
+--- a/flex/stack_description_scanner.l
++++ b/flex/stack_description_scanner.l
+@@ -189,6 +189,7 @@ path                    \"[^"]*\"
+ "to"                         return TO ;
+ "top"                        return TOP ;
+ "Tmap"                       return TMAP ;
++"Tstack"                     return TSTACK ;
+ "transfer"                   return TRANSFER ;
+ "transient"                  return TRANSIENT ;
+ "velocity"                   return VELOCITY ;
+diff --git a/include/analysis.h b/include/analysis.h
+index b83512f..ee22e76 100644
+--- a/include/analysis.h
++++ b/include/analysis.h
+@@ -83,9 +83,17 @@ extern "C"
+ 
+         Quantity_t CurrentTime ;
+ 
+-        /*! Initial Temperature if the IC stack */
++        /*! Initial Temperature of the IC stack */
+ 
+         Temperature_t InitialTemperature ;
++
++        /*! Initial Temperature File for the IC stack*/
++
++        String_t InitialTemperatureFile;
++
++        /*! Initial Temperature of the Heatsink */
++
++        Temperature_t InitialHeatsinkTemperature ;
+     } ;
+ 
+     /*! Definition of the type Analysis_t */
+diff --git a/include/dimensions.h b/include/dimensions.h
+index 02f95d2..9cf7552 100644
+--- a/include/dimensions.h
++++ b/include/dimensions.h
+@@ -53,7 +53,7 @@ extern "C"
+ 
+ #include "types.h"
+ #include "string_t.h"
+-    
++
+ struct HeatSink_t; //Forward decalration
+ 
+ /******************************************************************************/
+@@ -776,7 +776,7 @@ struct HeatSink_t; //Forward decalration
+      */
+ 
+     ChipDimension_t get_chip_area (Dimensions_t *dimensions) ;
+-    
++
+     /*! Returns the index of a thermal cell of the heat spreader
+      *
+      * The heat spreader is not considered a layer as its length and width
+@@ -797,18 +797,18 @@ struct HeatSink_t; //Forward decalration
+         CellIndex_t   row_index,
+         CellIndex_t   column_index
+     );
+-    
++
+     /*!
+      * A cell in the 3D layer is indexed using its own row, column and layer.
+      * A cell in the heat spreader is indexed using its own row and column,
+      * which are not the same as the row and column of the 3D layer stack.
+      * This is because the 3D layers are in the center of the heatsink, or
+      * equivalently there is a border around the 3D layers
+-     * 
++     *
+      * This function allows to access a cell of the heat spreader, using the
+      * coordinates of the 3D layer stack, which is always possible since the
+      * spreader is larger or equal in size.
+-     * 
++     *
+      * \param dimensions pointer to dimensions
+      * \param hsink pointer to heatsink
+      * \param row_index row in the 3D layer stack coordinates
+@@ -822,17 +822,17 @@ struct HeatSink_t; //Forward decalration
+         CellIndex_t   row_index,
+         CellIndex_t   column_index
+     );
+-    
++
+     /*!
+      * A cell in the 3D layer is indexed using its own row, column and layer.
+      * A cell in the heat spreader is indexed using its own row and column,
+      * which are not the same as the row and column of the 3D layer stack.
+      * This is because the 3D layers are in the center of the heatsink, or
+      * equivalently there is a border around the 3D layers
+-     * 
++     *
+      * This answers the question "is there a cell of the 3D layer stack
+      * underneath this spreader cell?"
+-     * 
++     *
+      * \param dimensions pointer to dimensions
+      * \param hsink pointer to heatsink
+      * \param row_index row in the heat spreader coordinates
+@@ -846,18 +846,18 @@ struct HeatSink_t; //Forward decalration
+         CellIndex_t   row_index,
+         CellIndex_t   column_index
+     );
+-    
++
+     /*!
+      * A cell in the 3D layer is indexed using its own row, column and layer.
+      * A cell in the heat spreader is indexed using its own row and column,
+      * which are not the same as the row and column of the 3D layer stack.
+      * This is because the 3D layers are in the center of the heatsink, or
+      * equivalently there is a border around the 3D layers
+-     * 
++     *
+      * This function allows to access a cell of the 3D layer stack, using the
+      * coordinates of the heat spreader. Note that there may be no cell
+      * underneath, so you have to call has_layer_underneath() before
+-     * 
++     *
+      * \param dimensions pointer to dimensions
+      * \param hsink pointer to heatsink
+      * \param layer_index which layer of the 3D stack?
+diff --git a/include/heat_sink.h b/include/heat_sink.h
+index 314e2c2..23433de 100644
+--- a/include/heat_sink.h
++++ b/include/heat_sink.h
+@@ -85,27 +85,27 @@ extern "C"
+         /*! Spreader dimensions, only for pluggable heatsink */
+ 
+         SpreaderDimension_t SpreaderLength, SpreaderWidth, SpreaderHeight;
+-        
++
+         /*! Spreader material, only for pluggable heatsink */
+ 
+         Material_t SpreaderMaterial;
+ 
+         /*! Plugin file name, only for pluggable heatsink */
+-        
++
+         String_t Plugin;
+-        
++
+         /*! Plugin args, only for pluggable heatsink */
+-        
++
+         String_t Args;
+-        
++
+         /*! The length of a spreader cell, only for pluggable heatsink */
+-        
++
+         CellDimension_t CellLength;
+-        
++
+         /*! The width of a spreader cell, only for pluggable heatsink */
+-        
++
+         CellDimension_t CellWidth;
+-        
++
+         /*! The number of rows of cells of the spreader, only for pluggable heatsink */
+ 
+         CellIndex_t NRows;
+@@ -113,19 +113,19 @@ extern "C"
+         /*! The number of columns of cells of the spreader, only for pluggable heatsink */
+ 
+         CellIndex_t NColumns;
+-        
++
+         /*! The number of rows of cells of the spreader border, which is the
+             part of the spreader not in contact with the chip,
+             only for pluggable heatsink */
+-        
++
+         CellIndex_t NumRowsBorder;
+-        
++
+         /*! The number of columns of cells of the spreader border, which is the
+             part of the spreader not in contact with the chip,
+             only for pluggable heatsink */
+-        
++
+         CellIndex_t NumColumnsBorder;
+-        
++
+         /*! The pluggable heatsink initialization callback */
+         int (*PluggableHeatsinkInit)(unsigned int nrows, unsigned int ncols,
+                                      double cellwidth,    double celllength,
+@@ -133,7 +133,7 @@ extern "C"
+                                      double spreaderconductance,
+                                      double timestep,
+                                      const char *args);
+-        
++
+         /*! The pluggable heatsink callback */
+         int (*PluggableHeatsink)(const double *spreadertemperatures,
+                                        double *sinkheatflows);
+@@ -253,14 +253,14 @@ extern "C"
+      */
+ 
+     void heat_sink_print (HeatSink_t *hsink, FILE *stream, String_t prefix) ;
+-    
++
+     /*! Computes the spreader number of cells based on the chip dimensions
+      *
+      * \param hsink the heatsink
+      * \param chip the chip dimensions
+      */
+     Error_t initialize_heat_spreader(HeatSink_t *hsink, Dimensions_t *chip);
+-    
++
+     /*! Initializies the pluggable heatsink
+      *
+      * \param hsink the heatsink
+@@ -270,13 +270,13 @@ extern "C"
+ 
+     /*! \return the thermal capacity of a cell in the heat spreader */
+     Capacity_t get_spreader_capacity(HeatSink_t *hsink);
+-    
++
+     /*! \return the thermal conductance along the x axis of a heat spreader cell */
+     Conductance_t get_spreader_conductance_east_west(HeatSink_t *hsink);
+-    
++
+     /*! \return the thermal conductance along the y axis of a heat spreader cell */
+     Conductance_t get_spreader_conductance_north_south(HeatSink_t *hsink);
+-    
++
+     /*! \return the thermal conductance along the z axis of a heat spreader cell */
+     Conductance_t get_spreader_conductance_top_bottom(HeatSink_t *hsink);
+ 
+diff --git a/include/inspection_point.h b/include/inspection_point.h
+index 2d00df3..aac1cec 100644
+--- a/include/inspection_point.h
++++ b/include/inspection_point.h
+@@ -57,6 +57,7 @@ extern "C"
+ #include "floorplan_element.h"
+ #include "stack_element.h"
+ #include "network_message.h"
++#include "thermal_data.h"
+ 
+ /******************************************************************************/
+ 
+@@ -280,6 +281,7 @@ extern "C"
+      *
+      * \param ipoint     the address of the InspectionPoint structure
+      * \param dimensions the address of the dimension structure
++     * \param topSink    the address of the top heatsink structure
+      * \param prefix string to be printed as suffix for every line in the header
+      *
+      *  \return FIXME
+@@ -287,7 +289,7 @@ extern "C"
+ 
+     Error_t generate_inspection_point_header
+ 
+-        (InspectionPoint_t *ipoint, Dimensions_t *dimensions, String_t prefix) ;
++        (InspectionPoint_t *ipoint, Dimensions_t *dimensions, HeatSink_t *topSink, String_t prefix) ;
+ 
+ 
+ 
+@@ -295,6 +297,7 @@ extern "C"
+      *
+      * \param ipoint the address of the InspectionPoint structure
+      * \param dimensions the address of the dimension structure
++     * \param topSink    the address of the top heatsink structure
+      * \param temperatures pointer to the first element of the temparature array
+      * \param sources      pointer to the first element of the source array
+      * \param current_time time instant of the measurement
+@@ -306,6 +309,7 @@ extern "C"
+     (
+         InspectionPoint_t *ipoint,
+         Dimensions_t      *dimensions,
++        HeatSink_t        *topSink,
+         Temperature_t     *temperatures,
+         Source_t          *sources,
+         Time_t             current_time
+diff --git a/include/output.h b/include/output.h
+index 443e5b6..324f1f9 100644
+--- a/include/output.h
++++ b/include/output.h
+@@ -54,6 +54,7 @@ extern "C"
+ #include "string_t.h"
+ 
+ #include "dimensions.h"
++#include "heat_sink.h"
+ #include "inspection_point_list.h"
+ #include "network_message.h"
+ 
+@@ -177,6 +178,7 @@ extern "C"
+      *
+      * \param output       pointer to the output structure
+      * \param dimensions the address of the dimension structure
++     * \param topSink    the address of the top heatsink structure
+      * \param prefix string to be printed as prefix for every
+      *               line in the header
+      *
+@@ -186,7 +188,7 @@ extern "C"
+ 
+     Error_t generate_output_headers
+ 
+-        (Output_t *output, Dimensions_t *dimensions, String_t prefix) ;
++        (Output_t *output, Dimensions_t *dimensions, HeatSink_t *topSink, String_t prefix) ;
+ 
+ 
+ 
+@@ -194,6 +196,7 @@ extern "C"
+      *
+      * \param output       pointer to the output structure
+      * \param dimensions the address of the dimension structure
++     * \param topSink    the address of the top heatsink structure
+      * \param temperatures pointer to the first element of the temparature array
+      * \param sources      pointer to the first element of the source array
+      * \param current_time the time instant at which the output is printed
+@@ -207,6 +210,7 @@ extern "C"
+     (
+         Output_t        *output,
+         Dimensions_t    *dimensions,
++        HeatSink_t      *topSink,
+         Temperature_t   *temperatures,
+         Source_t        *sources,
+         Time_t           current_time,
+diff --git a/include/thermal_data.h b/include/thermal_data.h
+index 0cb96eb..830cc3e 100644
+--- a/include/thermal_data.h
++++ b/include/thermal_data.h
+@@ -157,10 +157,14 @@ extern "C"
+     /*! Reset the thermal state to the initial temperature
+      *
+      * \param tdata     the address of the ThermalData structure to reset
++     * \param dimensions     the dimensions of the IC
+      * \param analysis the address of the Analysis structure related to \a tdata
++     * *
++     * \return \c TDICE_FAILURE if the state cannot be set
++     * \return \c TDICE_SUCCESS otherwise
+      */
+ 
+-    void reset_thermal_state (ThermalData_t *tdata, Analysis_t *analysis) ;
++    Error_t reset_thermal_state (ThermalData_t *tdata, Dimensions_t *dimensions, Analysis_t *analysis) ;
+ 
+ 
+ 
+@@ -310,6 +314,25 @@ extern "C"
+         String_t            file_name
+     ) ;
+ 
++
++
++    /*! Prints a matrix of temperatures as the thermal map the full stack
++     *
++     * \param dimensions    pointer to the structure storing the dimensions
++     * \param topSink    the address of the top heatsink structure
++     * \param temperatures  pointer to the first element of the temparature array
++     * \param stream        the reference to the (already opened) stream
++     */
++
++    void thermal_data_print_stack
++    (
++        Dimensions_t    *dimensions,
++        HeatSink_t      *topSink,
++        Temperature_t   *temperatures,
++        FILE            *stream
++    ) ;
++
++
+ /******************************************************************************/
+ 
+ #ifdef __cplusplus
+diff --git a/include/types.h b/include/types.h
+index a3e9686..07fb1b7 100644
+--- a/include/types.h
++++ b/include/types.h
+@@ -257,7 +257,7 @@ extern "C"
+         /*! Solid layer (passive) connected to the environment to dissipate heat */
+ 
+         TDICE_LAYER_SOLID_CONNECTED_TO_AMBIENT,
+-        
++
+         /*! Solid layer (passive) connected to heat spreader to dissipate heat */
+ 
+         TDICE_LAYER_SOLID_CONNECTED_TO_SPREADER,
+@@ -269,7 +269,7 @@ extern "C"
+         /*! Solid layer (active) connected to the environment to dissipate heat */
+ 
+         TDICE_LAYER_SOURCE_CONNECTED_TO_AMBIENT,
+-        
++
+         /*! Solid layer (active) connected to heat spreader to dissipate heat */
+ 
+         TDICE_LAYER_SOURCE_CONNECTED_TO_SPREADER,
+@@ -504,6 +504,7 @@ extern "C"
+         TDICE_OUTPUT_TYPE_TFLP,       //!< All the element in a floorplan
+         TDICE_OUTPUT_TYPE_TFLPEL,     //!< A single floorplan element
+         TDICE_OUTPUT_TYPE_TMAP,       //!< The thermal map of a stack element
++        TDICE_OUTPUT_TYPE_TSTACK,     //!< The full thermal stack
+         TDICE_OUTPUT_TYPE_PMAP,       //!< The power map of a die (its floorplan)
+         TDICE_OUTPUT_TYPE_TCOOLANT    //!< The coolant leaving the cavity
+     } ;
+diff --git a/sources/analysis.c b/sources/analysis.c
+index 000861d..af751ce 100644
+--- a/sources/analysis.c
++++ b/sources/analysis.c
+@@ -50,6 +50,8 @@ void analysis_init (Analysis_t *analysis)
+     analysis->SlotLength         = (Quantity_t) 0u ;
+     analysis->CurrentTime        = (Quantity_t) 0u ;
+     analysis->InitialTemperature = (Temperature_t) 0.0 ;
++    string_init(&analysis->InitialTemperatureFile);
++    analysis->InitialHeatsinkTemperature = (Temperature_t) 0.0 ;
+ }
+ 
+ /******************************************************************************/
+@@ -64,14 +66,15 @@ void analysis_copy (Analysis_t *dst, Analysis_t *src)
+     dst->SlotLength         = src->SlotLength ;
+     dst->CurrentTime        = src->CurrentTime ;
+     dst->InitialTemperature = src->InitialTemperature ;
++    string_copy(&dst->InitialTemperatureFile,&src->InitialTemperatureFile);
++    dst->InitialHeatsinkTemperature = src->InitialHeatsinkTemperature ;
+ }
+ 
+ /******************************************************************************/
+ 
+ void analysis_destroy (Analysis_t *analysis)
+ {
+-    // Nothing to do ...
+-
++    string_destroy (&analysis->InitialTemperatureFile);
+     analysis_init (analysis) ;
+ }
+ 
+@@ -133,8 +136,22 @@ void analysis_print (Analysis_t *analysis, FILE *stream, String_t prefix)
+         fprintf (stream, "  transient step %.2f, slot %.2f ;\n",
+             analysis->StepTime, analysis->SlotTime) ;
+ 
+-    fprintf (stream, "%s  initial temperature  %.2f ;\n",
+-        prefix, analysis->InitialTemperature) ;
++    if (analysis->InitialTemperatureFile == NULL)
++    {
++        fprintf (stream, "%s  initial temperature  %.2f ;\n",
++            prefix, analysis->InitialTemperature) ;
++    }
++    else
++    {
++        fprintf (stream, "%s   initial temperature file %s ;\n",
++            prefix, analysis->InitialTemperatureFile) ;
++
++        fprintf (stream, "%s  initial temperature  %.2f (IGNORED);\n",
++            prefix, analysis->InitialTemperature) ;
++    }
++
++    fprintf (stream, "%s  initial sink temperature  %.2f ;\n",
++        prefix, analysis->InitialHeatsinkTemperature) ;
+ 
+     fprintf (stream, "%s\n", prefix) ;
+ }
+diff --git a/sources/heat_sink.c b/sources/heat_sink.c
+index de5f033..93ddbcc 100644
+--- a/sources/heat_sink.c
++++ b/sources/heat_sink.c
+@@ -367,7 +367,7 @@ Error_t initialize_pluggable_heatsink(HeatSink_t *hsink, Analysis_t *analysis)
+     if(hsink->PluggableHeatsinkInit(
+         hsink->NRows,     hsink->NColumns,
+         hsink->CellWidth, hsink->CellLength,
+-        analysis->InitialTemperature,
++        analysis->InitialHeatsinkTemperature,
+         spreaderConductance,
+         analysis->StepTime,
+         hsink->Args) != 0)
+diff --git a/sources/inspection_point.c b/sources/inspection_point.c
+index 58c07cd..d294f1e 100644
+--- a/sources/inspection_point.c
++++ b/sources/inspection_point.c
+@@ -214,6 +214,13 @@ void inspection_point_print
+ 
+             break ;
+ 
++        case TDICE_OUTPUT_TYPE_TSTACK :
++
++            fprintf (stream, "%sTdata     (\"%s\", ",
++                prefix, ipoint->FileName) ;
++
++            break ;
++
+         case TDICE_OUTPUT_TYPE_PMAP :
+ 
+             fprintf (stream, "%sPmap     (%s, \"%s\", ",
+@@ -326,6 +333,7 @@ bool is_inspection_point
+ 
+         case TDICE_OUTPUT_TYPE_TCELL :
+         case TDICE_OUTPUT_TYPE_TMAP :
++        case TDICE_OUTPUT_TYPE_TSTACK :
+         case TDICE_OUTPUT_TYPE_PMAP :
+ 
+             return true ;
+@@ -350,6 +358,7 @@ Error_t generate_inspection_point_header
+ (
+     InspectionPoint_t *ipoint,
+     Dimensions_t      *dimensions,
++    HeatSink_t        *topSink,
+     String_t           prefix
+ )
+ {
+@@ -484,6 +493,18 @@ Error_t generate_inspection_point_header
+ 
+             break ;
+ 
++        case TDICE_OUTPUT_TYPE_TSTACK :
++
++            fprintf (output_stream, "%sThermal stack data", prefix) ;
++
++            if (topSink && topSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
++
++               fprintf(output_stream, " with pluggable heatsink layer") ;
++
++            fprintf (output_stream, "\n") ;
++
++            break ;
++
+         case TDICE_OUTPUT_TYPE_PMAP :
+ 
+             fprintf (output_stream,
+@@ -554,6 +575,7 @@ Error_t generate_inspection_point_output
+ (
+     InspectionPoint_t *ipoint,
+     Dimensions_t      *dimensions,
++    HeatSink_t        *topSink,
+     Temperature_t     *temperatures,
+     Source_t          *sources,
+     Time_t             current_time
+@@ -702,6 +724,14 @@ Error_t generate_inspection_point_output
+ 
+             break ;
+ 
++        case TDICE_OUTPUT_TYPE_TSTACK :
++
++            thermal_data_print_stack(dimensions, topSink, temperatures, output_stream) ;
++
++            fprintf (output_stream, "\n") ;
++
++            break ;
++
+         case TDICE_OUTPUT_TYPE_PMAP :
+ 
+             stack_element_print_power_map
+diff --git a/sources/output.c b/sources/output.c
+index 683564e..cb71ba1 100644
+--- a/sources/output.c
++++ b/sources/output.c
+@@ -191,6 +191,7 @@ Error_t generate_output_headers
+ (
+     Output_t     *output,
+     Dimensions_t *dimensions,
++    HeatSink_t   *topSink,
+     String_t      prefix
+ )
+ {
+@@ -202,7 +203,7 @@ Error_t generate_output_headers
+     {
+         InspectionPoint_t *ipoint = inspection_point_list_data (ipn) ;
+ 
+-        if (generate_inspection_point_header (ipoint, dimensions, prefix) != TDICE_SUCCESS)
++        if (generate_inspection_point_header (ipoint, dimensions, topSink, prefix) != TDICE_SUCCESS)
+ 
+             return TDICE_FAILURE ;
+     }
+@@ -213,7 +214,7 @@ Error_t generate_output_headers
+     {
+         InspectionPoint_t *ipoint = inspection_point_list_data (ipn) ;
+ 
+-        if (generate_inspection_point_header (ipoint, dimensions, prefix) != TDICE_SUCCESS)
++        if (generate_inspection_point_header (ipoint, dimensions, topSink, prefix) != TDICE_SUCCESS)
+ 
+             return TDICE_FAILURE ;
+     }
+@@ -224,7 +225,7 @@ Error_t generate_output_headers
+     {
+         InspectionPoint_t *ipoint = inspection_point_list_data (ipn) ;
+ 
+-        if (generate_inspection_point_header (ipoint, dimensions, prefix) != TDICE_SUCCESS)
++        if (generate_inspection_point_header (ipoint, dimensions, topSink, prefix) != TDICE_SUCCESS)
+ 
+             return TDICE_FAILURE ;
+     }
+@@ -238,6 +239,7 @@ Error_t generate_output
+ (
+     Output_t        *output,
+     Dimensions_t    *dimensions,
++    HeatSink_t      *topSink,
+     Temperature_t   *temperatures,
+     Source_t        *sources,
+     Time_t           current_time,
+@@ -275,7 +277,7 @@ Error_t generate_output
+ 
+         Error_t error = generate_inspection_point_output
+ 
+-            (ipoint, dimensions, temperatures, sources, current_time) ;
++            (ipoint, dimensions, topSink, temperatures, sources, current_time) ;
+ 
+         if (error != TDICE_SUCCESS)
+ 
+diff --git a/sources/thermal_data.c b/sources/thermal_data.c
+index 8a4f832..129d489 100644
+--- a/sources/thermal_data.c
++++ b/sources/thermal_data.c
+@@ -44,9 +44,161 @@
+ 
+ /******************************************************************************/
+ 
+-static void init_data (double* data, uint32_t size, double init_value)
++static Error_t init_data (double* data, uint32_t size, double init_value)
+ {
+     while (size--) *data++ = init_value ;
++    return TDICE_SUCCESS ;
++}
++
++int fpeek(FILE *stream)
++{
++    int c;
++    c = fgetc(stream);
++    ungetc(c, stream);
++    return c;
++}
++
++int skip_comment_lines(FILE *stream)
++{
++    char comment_line[1000];
++    while (fpeek(stream) == '%')
++    {
++        if (fgets(comment_line, sizeof comment_line, stream) == NULL)
++        {
++            return 1 ;
++        }
++    }
++    return 0 ;
++}
++
++#ifndef PERMISSIVE_STACK_LOAD
++int load_3d_grid_from_stream(FILE *input, double* data, double* next_temp, int* fscan_result, uint32_t size_0, uint32_t size_1, uint32_t size_2)
++{
++    int delimiter = 0 ;
++    uint32_t counter = 0 ;
++    uint32_t layer = 0 ;
++    uint32_t row = 0 ;
++    uint32_t column = 0 ;
++    for (layer = 0; layer < size_0 ; layer++)
++    {
++        for (row = 0; row < size_1 ; row++)
++        {
++            for (column = 0; column < size_2 ; column++)
++            {
++                if (*fscan_result == EOF)
++                    return counter ;
++                *data++ = *next_temp ;
++                counter++ ;
++                delimiter = getc (input) ;
++                if ((column < size_2 - 1) && (delimiter != ' '))
++                {
++                    fprintf(stderr, "In column:%d/%d row:%d/%d, layer:%d/%d\n", column+1, size_2, row+1, size_1, layer+1, size_0) ;
++                    fprintf(stderr, "Expected :space: delimiter but got :%c:\n", delimiter) ;
++                    return counter;
++                }
++                *fscan_result = fscanf(input,"%lf", next_temp) ;
++            }
++            if (*fscan_result == EOF)
++                return counter ;
++            if ((row < size_1 - 1) && (delimiter != '\t'))
++            {
++               fprintf(stderr, "In column:%d/%d row:%d/%d, layer:%d/%d\n", 1, size_2, row+1, size_1, layer+1, size_0) ;
++               fprintf(stderr, "Expected :tab: delimiter but got :%c:\n", delimiter) ;
++               return counter;
++            }
++        }
++        if (*fscan_result == EOF)
++            return counter ;
++        if (delimiter != '\n')
++        {
++            fprintf(stderr, "In column:%d/%d row:%d/%d, layer:%d/%d\n", 1, size_2, 1, size_1, layer+1, size_0) ;
++            fprintf(stderr, "Expected :new line: delimiter but got :%c:\n", delimiter) ;
++            return counter ;
++        }
++    }
++    return counter ;
++}
++#endif
++
++#ifdef PERMISSIVE_STACK_LOAD
++static Error_t init_data_from_file (double* data, uint32_t size, String_t file_name)
++{
++    fprintf (stdout, "Loading %s\n", file_name) ; fflush (stdout) ;
++#else
++static Error_t init_data_from_file_strict (double* data, uint32_t size_0, uint32_t size_1, uint32_t size_2, uint32_t extra_size_1, uint32_t extra_size_2, String_t file_name)
++{
++    fprintf (stdout, "Loading and validating %s\n", file_name) ; fflush (stdout) ;
++#endif
++    FILE* input = fopen(file_name, "r") ;
++    double next_temp ;
++    int fscan_result ;
++    unsigned int counter = 0 ;
++#ifndef PERMISSIVE_STACK_LOAD
++    unsigned int values_read ;
++    unsigned int extra_size_0 = 1 ;
++    unsigned int size_stk = size_0 * size_1 * size_2 ;
++    unsigned int size_sink = extra_size_0 * extra_size_1 * extra_size_2 ;
++    unsigned int size = size_stk + size_sink ;
++#endif
++    // Allow for comment(s) at the beginning of the file
++    if (skip_comment_lines (input) != 0)
++    {
++        // A file read error occurred while trying to skip comment lines
++        return TDICE_FAILURE ;
++    }
++
++    fscan_result = fscanf(input,"%lf", &next_temp) ;
++#ifdef PERMISSIVE_STACK_LOAD
++    while ((counter < size) && (fscan_result != EOF))
++    {
++        *data++ = next_temp ;
++        counter++;
++        // Let fscanf gobble up any whitespace delimiters
++        fscan_result = fscanf(input,"%lf", &next_temp) ;
++    }
++#else
++    fprintf(stdout, "Loading stack layers...\n") ; fflush (stdout) ;
++    values_read = load_3d_grid_from_stream(input, data, &next_temp, &fscan_result, size_0, size_1, size_2) ;
++    if (values_read < size_stk)
++    {
++        fclose(input) ;
++       return TDICE_FAILURE ;
++    }
++    counter += values_read ;
++    data += values_read ; // The pointer isn't incremented by load_3d_grid_from_stream
++
++    if (size_sink > 0)
++    {
++        fprintf(stdout, "Loading extra_sink layers...\n") ; fflush (stdout) ;
++        values_read = load_3d_grid_from_stream(input, data, &next_temp, &fscan_result, extra_size_0, extra_size_1, extra_size_2) ;
++        if (values_read < size_sink)
++        {
++            fclose(input) ;
++            return TDICE_FAILURE ;
++        }
++        counter += values_read ;
++        data += values_read ; // The pointer isn't incremented by load_3d_grid_from_stream
++    }
++#endif
++    if (fscan_result != EOF)
++    {
++        // There are more tokens left in the file.. something is wrong..
++        int extra_tokens = 1 ;
++        while (fscanf(input,"%lf", &next_temp) != EOF)
++            extra_tokens += 1 ;
++        fclose(input) ;
++        fprintf(stderr, "Error: %s had %d more values than the expected %d\n", file_name, extra_tokens, size) ;
++        return TDICE_FAILURE ;
++    }
++    else if (counter < size)
++    {
++        // There were less values read than expected.. something is wrong..
++        fclose(input) ;
++        fprintf(stderr, "Error: %s had %d values but %d were expected\n", file_name, counter, size) ;
++        return TDICE_FAILURE ;
++    }
++    fclose(input) ;
++    return TDICE_SUCCESS ;
+ }
+ 
+ /******************************************************************************/
+@@ -78,6 +230,24 @@ Error_t thermal_data_build
+ 
+     tdata->Size = get_number_of_cells (dimensions) ;
+ 
++    /* Alloc and fill the thermal grid */
++
++    result = thermal_grid_build (&tdata->ThermalGrid, dimensions) ;
++
++    if (result == TDICE_FAILURE)
++    {
++        fprintf (stderr, "Cannot malloc thermal grid\n") ;
++
++        return TDICE_FAILURE ;
++    }
++
++    result = thermal_grid_fill (&tdata->ThermalGrid, stack_elements_list) ;
++
++    if (result == TDICE_FAILURE)
++    {
++        return TDICE_FAILURE ;
++    }
++
+     /* Alloc and set temperatures */
+ 
+     tdata->Temperatures =
+@@ -93,39 +263,22 @@ Error_t thermal_data_build
+ 
+     /* Set Temperatures to the initial thermal state and builds SLU vector B */
+ 
+-    init_data (tdata->Temperatures, tdata->Size, analysis->InitialTemperature) ;
+-
+-    dCreate_Dense_Matrix  /* Vector B */
+-
+-        (&tdata->SLUMatrix_B, tdata->Size, 1,
+-         tdata->Temperatures, tdata->Size,
+-         SLU_DN, SLU_D, SLU_GE) ;
+-
+-    /* Alloc and fill the thermal grid */
+-
+-    result = thermal_grid_build (&tdata->ThermalGrid, dimensions) ;
+-
++    result = reset_thermal_state (tdata, dimensions, analysis) ;
+     if (result == TDICE_FAILURE)
+     {
+-        fprintf (stderr, "Cannot malloc thermal grid\n") ;
+-
+-        Destroy_SuperMatrix_Store (&tdata->SLUMatrix_B) ;
++        fprintf (stderr, "Failed to reset thermal state\n") ;
+ 
+         free (tdata->Temperatures) ;
+ 
+         return TDICE_FAILURE ;
+     }
+ 
+-    result = thermal_grid_fill (&tdata->ThermalGrid, stack_elements_list) ;
+-    
+-    if (result == TDICE_FAILURE)
+-    {
+-        Destroy_SuperMatrix_Store (&tdata->SLUMatrix_B) ;
++    dCreate_Dense_Matrix  /* Vector B */
+ 
+-        free (tdata->Temperatures) ;
++        (&tdata->SLUMatrix_B, tdata->Size, 1,
++         tdata->Temperatures, tdata->Size,
++         SLU_DN, SLU_D, SLU_GE) ;
+ 
+-        return TDICE_FAILURE ;
+-    }
+ 
+     /* Alloc and fill the power grid */
+ 
+@@ -202,9 +355,35 @@ void thermal_data_destroy (ThermalData_t *tdata)
+ 
+ /******************************************************************************/
+ 
+-void reset_thermal_state (ThermalData_t *tdata, Analysis_t *analysis)
++Error_t reset_thermal_state (ThermalData_t *tdata, Dimensions_t *dimensions, Analysis_t *analysis)
+ {
+-    init_data (tdata->Temperatures, tdata->Size, analysis->InitialTemperature) ;
++    unsigned int sink_rows = 0 ;
++    unsigned int sink_columns = 0 ;
++    if (tdata->ThermalGrid.TopHeatSink && tdata->ThermalGrid.TopHeatSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
++    {
++       sink_rows = tdata->ThermalGrid.TopHeatSink->NRows ;
++       sink_columns = tdata->ThermalGrid.TopHeatSink->NColumns ;
++    }
++    unsigned int layers = last_layer (dimensions) + 1;
++    unsigned int rows = last_row (dimensions) + 1;
++    unsigned int columns = last_column (dimensions) + 1;
++    unsigned int expected_size = layers * rows * columns + sink_rows*sink_columns;
++
++    if (tdata->Size != expected_size )
++    {
++        fprintf(stderr, "Something went wrong... tdata size(%d) does not match expected dimension size(%d)\n", tdata->Size, expected_size) ;
++        return TDICE_FAILURE ;
++    }
++    if (analysis->InitialTemperatureFile == NULL)
++        return init_data (tdata->Temperatures, tdata->Size, analysis->InitialTemperature) ;
++    else
++    {
++#ifdef PERMISSIVE_STACK_LOAD
++        return init_data_from_file (tdata->Temperatures, tdata->Size, analysis->InitialTemperatureFile) ;
++#else
++        return init_data_from_file_strict (tdata->Temperatures, layers, rows, columns, sink_rows, sink_columns, analysis->InitialTemperatureFile) ;
++#endif
++   }
+ }
+ 
+ /******************************************************************************/
+@@ -254,7 +433,7 @@ static void fill_system_vector
+             } // FOR_EVERY_COLUMN
+         } // FOR_EVERY_ROW
+     } // FOR_EVERY_LAYER
+-    
++
+     // Copy the rest of the vector
+     if(topSink && topSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
+     {
+@@ -322,14 +501,14 @@ Error_t pluggable_heatsink(ThermalData_t *tdata, Dimensions_t *dimensions)
+     HeatSink_t *sink = tdata->ThermalGrid.TopHeatSink;
+     if(sink == NULL || sink->SinkModel != TDICE_HEATSINK_TOP_PLUGGABLE)
+             return TDICE_SUCCESS;
+-    
++
+     //Get a pointer to the spreader temperatures
+     double *SpreaderTemperatures = tdata->Temperatures;
+     SpreaderTemperatures += get_spreader_cell_offset(dimensions,sink,0,0);
+-    
++
+     Source_t *sources = tdata->PowerGrid.Sources;
+     sources += get_spreader_cell_offset(dimensions,sink,0,0);
+-    
++
+     // Call the pluggable heat sink function to compute the heat flows to
+     // the heatsink
+     if(sink->PluggableHeatsink(SpreaderTemperatures,sources))
+@@ -337,7 +516,7 @@ Error_t pluggable_heatsink(ThermalData_t *tdata, Dimensions_t *dimensions)
+         fprintf(stderr, "Error: pluggable heatsink callback failed\n");
+         return TDICE_FAILURE;
+     }
+-    
++
+     // Both 3D-ICE and plugin use passive sign convention
+     unsigned int size = sink->NColumns * sink->NRows;
+     unsigned int i;
+@@ -368,7 +547,7 @@ SimResult_t emulate_step
+ 
+             return TDICE_END_OF_SIMULATION ;
+     }
+-    
++
+     if(pluggable_heatsink(tdata, dimensions) == TDICE_FAILURE)
+         return TDICE_SOLVER_ERROR ;
+ 
+@@ -551,3 +730,55 @@ Error_t print_thermal_map
+ 
+     return TDICE_SUCCESS ;
+ }
++
++/******************************************************************************/
++
++void thermal_data_print_stack
++(
++    Dimensions_t    *dimensions,
++    HeatSink_t      *topSink,
++    Temperature_t   *temperatures,
++    FILE            *stream
++)
++{
++
++
++    CellIndex_t layer ;
++    CellIndex_t row ;
++    CellIndex_t column ;
++
++    for (layer = first_layer (dimensions) ; layer <= last_layer (dimensions) ; layer++)
++    {
++        for (row = first_row (dimensions) ; row <= last_row (dimensions) ; row++)
++        {
++            for (column = first_column (dimensions) ; column <= last_column (dimensions) ; column++)
++            {
++                fprintf (stream, "%7.3f", *temperatures++) ;
++                if (column < last_column (dimensions))
++                   fprintf(stream, " ") ;
++            } // FOR_EVERY_COLUMN
++            if (row < last_row (dimensions))
++               fprintf (stream, "\t") ;
++        } // FOR_EVERY_ROW
++        if (layer < last_layer (dimensions))
++            fprintf (stream, "\n") ;
++    } // FOR_EVERY_LAYER
++
++    // When using the pluggable heatsink there are additional cells for the heat spreader
++    if(topSink && topSink->SinkModel == TDICE_HEATSINK_TOP_PLUGGABLE)
++    {
++        fprintf (stream, "\n") ;
++        for (row = 0 ; row < topSink->NRows ; row++)
++        {
++            for (column = 0 ; column < topSink->NColumns ; column++)
++            {
++                fprintf (stream, "%7.3f", *temperatures++) ;
++                if (column < topSink->NColumns - 1)
++                   fprintf(stream, " ") ;
++            } // FOR_EVERY_COLUMN
++            if (row < topSink->NRows -1)
++                fprintf (stream, "\t") ;
++        } // FOR_EVERY_ROW
++    fprintf (stream, "\n") ;
++    } // IF TDICE_HEATSINK_TOP_PLUGGABLE
++}
+diff --git a/test/Makefile b/test/Makefile
+index 482f4da..ff2c756 100644
+--- a/test/Makefile
++++ b/test/Makefile
+@@ -164,6 +164,33 @@ runtest: GenerateSystemMatrix CompareSystemMatrix CompareTemperatures plugintest
+ 	@../bin/3D-ICE-Emulator pf2rm/steady/2dies_background.stk > /dev/null
+ 	@./CompareTemperatures pf2rm/steady/background_node1.txt    pf2rm/steady/background_node2.txt    pf2rm/steady/output_background.txt
+ 	@echo ""
++	@echo "Testing Initialization"
++	@echo "------------------------------"
++	@cd initialization; rm -f Test.TestHeatsink_Interface3DICE ; ln -s ../plugin/Test.TestHeatsink_Interface3DICE/ ./
++	@echo -n "single temp       : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_single.stk | grep '^source' > test_single.txt; cd ..
++	@./CompareTemperatures initialization/test_single_top.txt initialization/test_single_bottom.txt initialization/reference/test.txt
++	@cmp initialization/test_single.txt initialization/reference/test_single.txt || echo "FAILED mapping"
++	@echo -n "two same temps    : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_scalars_single.stk | grep '^source' > test_scalars_single.txt; cd ..
++	@./CompareTemperatures initialization/test_scalars_single_top.txt initialization/test_scalars_single_bottom.txt initialization/reference/test.txt
++	@cmp initialization/test_scalars_single.txt initialization/reference/test_single.txt || echo "FAILED mapping"
++	@echo -n "diff temps +      : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_scalars1.stk | grep '^source' > test_scalars1.txt; cd ..
++	@echo "WARNING: No ground truth available"
++	@echo -n "diff temps -      : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_scalars2.stk | grep '^source' > test_scalars2.txt; cd ..
++	@echo "WARNING: No ground truth available"
++	@echo -n "stk temp file     : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_file.stk | grep '^source' > test_file.txt; cd ../
++	@./CompareTemperatures initialization/test_file_top.txt initialization/test_file_bottom.txt initialization/reference/test.txt
++	@cmp initialization/test_file.txt initialization/reference/test_single.txt || echo "FAILED mapping"
++	@echo -n "stk temp file split runs   : "
++	@cd initialization; ../../bin/3D-ICE-Emulator test_split_both.stk | grep '^source' > test_split_both.txt; cd ..
++	@cd initialization; ../../bin/3D-ICE-Emulator test_split_1.stk | grep '^source' > test_split_1.txt; cd ..
++	@cd initialization; ../../bin/3D-ICE-Emulator test_split_2.stk | grep '^source' > test_split_2.txt; cd ..
++	@echo "WARNING: No ground truth available"
++	@echo ""
+ 	@echo "Comparison of plugin results ...."
+ 	@echo "------------------------------"
+ 	@echo -n "aligned           : "
+diff --git a/test/initialization/const.tdata b/test/initialization/const.tdata
+new file mode 100644
+index 0000000..4cdc605
+--- /dev/null
++++ b/test/initialization/const.tdata
+@@ -0,0 +1,4 @@
++% Thermal stack data
++300.0	300.0
++300.0	300.0
++
+diff --git a/test/initialization/reference/test.txt b/test/initialization/reference/test.txt
+new file mode 100644
+index 0000000..892e9f3
+--- /dev/null
++++ b/test/initialization/reference/test.txt
+@@ -0,0 +1,1000 @@
++0.001	300	300.058
++0.002	300	300.112
++0.003	300	300.162
++0.004	300	300.21
++0.005	300.001	300.256
++0.006	300.001	300.299
++0.007	300.001	300.339
++0.008	300.001	300.378
++0.009	300.001	300.415
++0.01	300.002	300.45
++0.011	300.002	300.483
++0.012	300.002	300.516
++0.013	300.003	300.546
++0.014	300.003	300.576
++0.015	300.003	300.605
++0.016	300.004	300.632
++0.017	300.004	300.659
++0.018	300.004	300.685
++0.019	300.005	300.71
++0.02	300.005	300.734
++0.021	300.006	300.757
++0.022	300.006	300.78
++0.023	300.006	300.802
++0.024	300.007	300.824
++0.025	300.007	300.845
++0.026	300.008	300.865
++0.027	300.008	300.885
++0.028	300.009	300.905
++0.029	300.009	300.924
++0.03	300.01	300.942
++0.031	300.01	300.961
++0.032	300.011	300.978
++0.033	300.011	300.996
++0.034	300.012	301.013
++0.035	300.012	301.03
++0.036	300.013	301.047
++0.037	300.013	301.063
++0.038	300.014	301.079
++0.039	300.014	301.094
++0.04	300.015	301.11
++0.041	300.016	301.125
++0.042	300.016	301.139
++0.043	300.017	301.154
++0.044	300.017	301.168
++0.045	300.018	301.182
++0.046	300.018	301.196
++0.047	300.019	301.21
++0.048	300.02	301.223
++0.049	300.02	301.236
++0.05	300.021	301.249
++0.051	300.021	301.262
++0.052	300.022	301.275
++0.053	300.023	301.287
++0.054	300.023	301.299
++0.055	300.024	301.311
++0.056	300.024	301.323
++0.057	300.025	301.335
++0.058	300.026	301.346
++0.059	300.026	301.357
++0.06	300.027	301.368
++0.061	300.027	301.379
++0.062	300.028	301.39
++0.063	300.029	301.4
++0.064	300.029	301.411
++0.065	300.03	301.421
++0.066	300.031	301.431
++0.067	300.031	301.441
++0.068	300.032	301.451
++0.069	300.032	301.461
++0.07	300.033	301.47
++0.071	300.034	301.479
++0.072	300.034	301.489
++0.073	300.035	301.498
++0.074	300.036	301.507
++0.075	300.036	301.515
++0.076	300.037	301.524
++0.077	300.038	301.533
++0.078	300.038	301.541
++0.079	300.039	301.549
++0.08	300.039	301.557
++0.081	300.04	301.566
++0.082	300.041	301.573
++0.083	300.041	301.581
++0.084	300.042	301.589
++0.085	300.042	301.597
++0.086	300.043	301.604
++0.087	300.044	301.611
++0.088	300.044	301.619
++0.089	300.045	301.626
++0.09	300.046	301.633
++0.091	300.046	301.64
++0.092	300.047	301.646
++0.093	300.047	301.653
++0.094	300.048	301.66
++0.095	300.049	301.666
++0.096	300.049	301.673
++0.097	300.05	301.679
++0.098	300.05	301.685
++0.099	300.051	301.691
++0.1	300.052	301.698
++0.101	300.052	301.703
++0.102	300.053	301.709
++0.103	300.053	301.715
++0.104	300.054	301.721
++0.105	300.054	301.726
++0.106	300.055	301.732
++0.107	300.056	301.737
++0.108	300.056	301.743
++0.109	300.057	301.748
++0.11	300.057	301.753
++0.111	300.058	301.758
++0.112	300.058	301.763
++0.113	300.059	301.768
++0.114	300.059	301.773
++0.115	300.06	301.778
++0.116	300.06	301.783
++0.117	300.061	301.788
++0.118	300.062	301.792
++0.119	300.062	301.797
++0.12	300.063	301.801
++0.121	300.063	301.806
++0.122	300.064	301.81
++0.123	300.064	301.814
++0.124	300.065	301.819
++0.125	300.065	301.823
++0.126	300.066	301.827
++0.127	300.066	301.831
++0.128	300.067	301.835
++0.129	300.067	301.839
++0.13	300.068	301.843
++0.131	300.068	301.847
++0.132	300.069	301.85
++0.133	300.069	301.854
++0.134	300.07	301.858
++0.135	300.07	301.861
++0.136	300.07	301.865
++0.137	300.071	301.868
++0.138	300.071	301.872
++0.139	300.072	301.875
++0.14	300.072	301.878
++0.141	300.073	301.882
++0.142	300.073	301.885
++0.143	300.074	301.888
++0.144	300.074	301.891
++0.145	300.075	301.894
++0.146	300.075	301.897
++0.147	300.075	301.9
++0.148	300.076	301.903
++0.149	300.076	301.906
++0.15	300.077	301.909
++0.151	300.077	301.912
++0.152	300.078	301.915
++0.153	300.078	301.917
++0.154	300.078	301.92
++0.155	300.079	301.923
++0.156	300.079	301.925
++0.157	300.08	301.928
++0.158	300.08	301.931
++0.159	300.08	301.933
++0.16	300.081	301.936
++0.161	300.081	301.938
++0.162	300.081	301.94
++0.163	300.082	301.943
++0.164	300.082	301.945
++0.165	300.083	301.947
++0.166	300.083	301.95
++0.167	300.083	301.952
++0.168	300.084	301.954
++0.169	300.084	301.956
++0.17	300.084	301.958
++0.171	300.085	301.96
++0.172	300.085	301.962
++0.173	300.085	301.965
++0.174	300.086	301.967
++0.175	300.086	301.969
++0.176	300.086	301.97
++0.177	300.087	301.972
++0.178	300.087	301.974
++0.179	300.087	301.976
++0.18	300.088	301.978
++0.181	300.088	301.98
++0.182	300.088	301.982
++0.183	300.089	301.983
++0.184	300.089	301.985
++0.185	300.089	301.987
++0.186	300.09	301.988
++0.187	300.09	301.99
++0.188	300.09	301.992
++0.189	300.091	301.993
++0.19	300.091	301.995
++0.191	300.091	301.996
++0.192	300.091	301.998
++0.193	300.092	302
++0.194	300.092	302.001
++0.195	300.092	302.002
++0.196	300.093	302.004
++0.197	300.093	302.005
++0.198	300.093	302.007
++0.199	300.093	302.008
++0.2	300.094	302.009
++0.201	300.094	302.011
++0.202	300.094	302.012
++0.203	300.094	302.013
++0.204	300.095	302.015
++0.205	300.095	302.016
++0.206	300.095	302.017
++0.207	300.095	302.019
++0.208	300.096	302.02
++0.209	300.096	302.021
++0.21	300.096	302.022
++0.211	300.096	302.023
++0.212	300.097	302.024
++0.213	300.097	302.026
++0.214	300.097	302.027
++0.215	300.097	302.028
++0.216	300.098	302.029
++0.217	300.098	302.03
++0.218	300.098	302.031
++0.219	300.098	302.032
++0.22	300.098	302.033
++0.221	300.099	302.034
++0.222	300.099	302.035
++0.223	300.099	302.036
++0.224	300.099	302.037
++0.225	300.1	302.038
++0.226	300.1	302.039
++0.227	300.1	302.04
++0.228	300.1	302.041
++0.229	300.1	302.041
++0.23	300.101	302.042
++0.231	300.101	302.043
++0.232	300.101	302.044
++0.233	300.101	302.045
++0.234	300.101	302.046
++0.235	300.102	302.046
++0.236	300.102	302.047
++0.237	300.102	302.048
++0.238	300.102	302.049
++0.239	300.102	302.05
++0.24	300.102	302.05
++0.241	300.103	302.051
++0.242	300.103	302.052
++0.243	300.103	302.053
++0.244	300.103	302.053
++0.245	300.103	302.054
++0.246	300.103	302.055
++0.247	300.104	302.055
++0.248	300.104	302.056
++0.249	300.104	302.057
++0.25	300.104	302.057
++0.251	300.104	302.058
++0.252	300.104	302.059
++0.253	300.105	302.059
++0.254	300.105	302.06
++0.255	300.105	302.06
++0.256	300.105	302.061
++0.257	300.105	302.062
++0.258	300.105	302.062
++0.259	300.105	302.063
++0.26	300.106	302.063
++0.261	300.106	302.064
++0.262	300.106	302.064
++0.263	300.106	302.065
++0.264	300.106	302.065
++0.265	300.106	302.066
++0.266	300.106	302.066
++0.267	300.107	302.067
++0.268	300.107	302.068
++0.269	300.107	302.068
++0.27	300.107	302.068
++0.271	300.107	302.069
++0.272	300.107	302.069
++0.273	300.107	302.07
++0.274	300.107	302.07
++0.275	300.108	302.071
++0.276	300.108	302.071
++0.277	300.108	302.072
++0.278	300.108	302.072
++0.279	300.108	302.073
++0.28	300.108	302.073
++0.281	300.108	302.073
++0.282	300.108	302.074
++0.283	300.108	302.074
++0.284	300.109	302.075
++0.285	300.109	302.075
++0.286	300.109	302.075
++0.287	300.109	302.076
++0.288	300.109	302.076
++0.289	300.109	302.076
++0.29	300.109	302.077
++0.291	300.109	302.077
++0.292	300.109	302.077
++0.293	300.109	302.078
++0.294	300.11	302.078
++0.295	300.11	302.079
++0.296	300.11	302.079
++0.297	300.11	302.079
++0.298	300.11	302.079
++0.299	300.11	302.08
++0.3	300.11	302.08
++0.301	300.11	302.08
++0.302	300.11	302.081
++0.303	300.11	302.081
++0.304	300.11	302.081
++0.305	300.111	302.082
++0.306	300.111	302.082
++0.307	300.111	302.082
++0.308	300.111	302.082
++0.309	300.111	302.083
++0.31	300.111	302.083
++0.311	300.111	302.083
++0.312	300.111	302.084
++0.313	300.111	302.084
++0.314	300.111	302.084
++0.315	300.111	302.084
++0.316	300.111	302.085
++0.317	300.112	302.085
++0.318	300.112	302.085
++0.319	300.112	302.085
++0.32	300.112	302.085
++0.321	300.112	302.086
++0.322	300.112	302.086
++0.323	300.112	302.086
++0.324	300.112	302.086
++0.325	300.112	302.087
++0.326	300.112	302.087
++0.327	300.112	302.087
++0.328	300.112	302.087
++0.329	300.112	302.087
++0.33	300.112	302.088
++0.331	300.112	302.088
++0.332	300.113	302.088
++0.333	300.113	302.088
++0.334	300.113	302.088
++0.335	300.113	302.089
++0.336	300.113	302.089
++0.337	300.113	302.089
++0.338	300.113	302.089
++0.339	300.113	302.089
++0.34	300.113	302.089
++0.341	300.113	302.09
++0.342	300.113	302.09
++0.343	300.113	302.09
++0.344	300.113	302.09
++0.345	300.113	302.09
++0.346	300.113	302.09
++0.347	300.113	302.091
++0.348	300.113	302.091
++0.349	300.113	302.091
++0.35	300.114	302.091
++0.351	300.114	302.091
++0.352	300.114	302.091
++0.353	300.114	302.091
++0.354	300.114	302.092
++0.355	300.114	302.092
++0.356	300.114	302.092
++0.357	300.114	302.092
++0.358	300.114	302.092
++0.359	300.114	302.092
++0.36	300.114	302.092
++0.361	300.114	302.093
++0.362	300.114	302.093
++0.363	300.114	302.093
++0.364	300.114	302.093
++0.365	300.114	302.093
++0.366	300.114	302.093
++0.367	300.114	302.093
++0.368	300.114	302.093
++0.369	300.114	302.093
++0.37	300.114	302.094
++0.371	300.114	302.094
++0.372	300.115	302.094
++0.373	300.115	302.094
++0.374	300.115	302.094
++0.375	300.115	302.094
++0.376	300.115	302.094
++0.377	300.115	302.094
++0.378	300.115	302.094
++0.379	300.115	302.095
++0.38	300.115	302.095
++0.381	300.115	302.095
++0.382	300.115	302.095
++0.383	300.115	302.095
++0.384	300.115	302.095
++0.385	300.115	302.095
++0.386	300.115	302.095
++0.387	300.115	302.095
++0.388	300.115	302.095
++0.389	300.115	302.095
++0.39	300.115	302.095
++0.391	300.115	302.096
++0.392	300.115	302.096
++0.393	300.115	302.096
++0.394	300.115	302.096
++0.395	300.115	302.096
++0.396	300.115	302.096
++0.397	300.115	302.096
++0.398	300.115	302.096
++0.399	300.115	302.096
++0.4	300.115	302.096
++0.401	300.115	302.096
++0.402	300.115	302.096
++0.403	300.115	302.096
++0.404	300.116	302.097
++0.405	300.116	302.097
++0.406	300.116	302.097
++0.407	300.116	302.097
++0.408	300.116	302.097
++0.409	300.116	302.097
++0.41	300.116	302.097
++0.411	300.116	302.097
++0.412	300.116	302.097
++0.413	300.116	302.097
++0.414	300.116	302.097
++0.415	300.116	302.097
++0.416	300.116	302.097
++0.417	300.116	302.097
++0.418	300.116	302.097
++0.419	300.116	302.097
++0.42	300.116	302.097
++0.421	300.116	302.098
++0.422	300.116	302.098
++0.423	300.116	302.098
++0.424	300.116	302.098
++0.425	300.116	302.098
++0.426	300.116	302.098
++0.427	300.116	302.098
++0.428	300.116	302.098
++0.429	300.116	302.098
++0.43	300.116	302.098
++0.431	300.116	302.098
++0.432	300.116	302.098
++0.433	300.116	302.098
++0.434	300.116	302.098
++0.435	300.116	302.098
++0.436	300.116	302.098
++0.437	300.116	302.098
++0.438	300.116	302.098
++0.439	300.116	302.098
++0.44	300.116	302.098
++0.441	300.116	302.098
++0.442	300.116	302.098
++0.443	300.116	302.099
++0.444	300.116	302.099
++0.445	300.116	302.099
++0.446	300.116	302.099
++0.447	300.116	302.099
++0.448	300.116	302.099
++0.449	300.116	302.099
++0.45	300.116	302.099
++0.451	300.116	302.099
++0.452	300.116	302.099
++0.453	300.116	302.099
++0.454	300.116	302.099
++0.455	300.116	302.099
++0.456	300.117	302.099
++0.457	300.117	302.099
++0.458	300.117	302.099
++0.459	300.117	302.099
++0.46	300.117	302.099
++0.461	300.117	302.099
++0.462	300.117	302.099
++0.463	300.117	302.099
++0.464	300.117	302.099
++0.465	300.117	302.099
++0.466	300.117	302.099
++0.467	300.117	302.099
++0.468	300.117	302.099
++0.469	300.117	302.099
++0.47	300.117	302.099
++0.471	300.117	302.099
++0.472	300.117	302.099
++0.473	300.117	302.099
++0.474	300.117	302.099
++0.475	300.117	302.099
++0.476	300.117	302.1
++0.477	300.117	302.1
++0.478	300.117	302.1
++0.479	300.117	302.1
++0.48	300.117	302.1
++0.481	300.117	302.1
++0.482	300.117	302.1
++0.483	300.117	302.1
++0.484	300.117	302.1
++0.485	300.117	302.1
++0.486	300.117	302.1
++0.487	300.117	302.1
++0.488	300.117	302.1
++0.489	300.117	302.1
++0.49	300.117	302.1
++0.491	300.117	302.1
++0.492	300.117	302.1
++0.493	300.117	302.1
++0.494	300.117	302.1
++0.495	300.117	302.1
++0.496	300.117	302.1
++0.497	300.117	302.1
++0.498	300.117	302.1
++0.499	300.117	302.1
++0.5	300.117	302.1
++0.501	300.117	302.1
++0.502	300.117	302.1
++0.503	300.117	302.1
++0.504	300.117	302.1
++0.505	300.117	302.1
++0.506	300.117	302.1
++0.507	300.117	302.1
++0.508	300.117	302.1
++0.509	300.117	302.1
++0.51	300.117	302.1
++0.511	300.117	302.1
++0.512	300.117	302.1
++0.513	300.117	302.1
++0.514	300.117	302.1
++0.515	300.117	302.1
++0.516	300.117	302.1
++0.517	300.117	302.1
++0.518	300.117	302.1
++0.519	300.117	302.1
++0.52	300.117	302.1
++0.521	300.117	302.1
++0.522	300.117	302.1
++0.523	300.117	302.1
++0.524	300.117	302.1
++0.525	300.117	302.1
++0.526	300.117	302.1
++0.527	300.117	302.1
++0.528	300.117	302.1
++0.529	300.117	302.1
++0.53	300.117	302.1
++0.531	300.117	302.1
++0.532	300.117	302.1
++0.533	300.117	302.1
++0.534	300.117	302.1
++0.535	300.117	302.1
++0.536	300.117	302.1
++0.537	300.117	302.1
++0.538	300.117	302.1
++0.539	300.117	302.1
++0.54	300.117	302.1
++0.541	300.117	302.1
++0.542	300.117	302.1
++0.543	300.117	302.101
++0.544	300.117	302.101
++0.545	300.117	302.101
++0.546	300.117	302.101
++0.547	300.117	302.101
++0.548	300.117	302.101
++0.549	300.117	302.101
++0.55	300.117	302.101
++0.551	300.117	302.101
++0.552	300.117	302.101
++0.553	300.117	302.101
++0.554	300.117	302.101
++0.555	300.117	302.101
++0.556	300.117	302.101
++0.557	300.117	302.101
++0.558	300.117	302.101
++0.559	300.117	302.101
++0.56	300.117	302.101
++0.561	300.117	302.101
++0.562	300.117	302.101
++0.563	300.117	302.101
++0.564	300.117	302.101
++0.565	300.117	302.101
++0.566	300.117	302.101
++0.567	300.117	302.101
++0.568	300.117	302.101
++0.569	300.117	302.101
++0.57	300.117	302.101
++0.571	300.117	302.101
++0.572	300.117	302.101
++0.573	300.117	302.101
++0.574	300.117	302.101
++0.575	300.117	302.101
++0.576	300.117	302.101
++0.577	300.117	302.101
++0.578	300.117	302.101
++0.579	300.117	302.101
++0.58	300.117	302.101
++0.581	300.117	302.101
++0.582	300.117	302.101
++0.583	300.117	302.101
++0.584	300.117	302.101
++0.585	300.117	302.101
++0.586	300.117	302.101
++0.587	300.117	302.101
++0.588	300.117	302.101
++0.589	300.117	302.101
++0.59	300.117	302.101
++0.591	300.117	302.101
++0.592	300.117	302.101
++0.593	300.117	302.101
++0.594	300.117	302.101
++0.595	300.117	302.101
++0.596	300.117	302.101
++0.597	300.117	302.101
++0.598	300.117	302.101
++0.599	300.117	302.101
++0.6	300.117	302.101
++0.601	300.117	302.101
++0.602	300.117	302.101
++0.603	300.117	302.101
++0.604	300.117	302.101
++0.605	300.117	302.101
++0.606	300.117	302.101
++0.607	300.117	302.101
++0.608	300.117	302.101
++0.609	300.117	302.101
++0.61	300.117	302.101
++0.611	300.117	302.101
++0.612	300.117	302.101
++0.613	300.117	302.101
++0.614	300.117	302.101
++0.615	300.117	302.101
++0.616	300.117	302.101
++0.617	300.117	302.101
++0.618	300.117	302.101
++0.619	300.117	302.101
++0.62	300.117	302.101
++0.621	300.117	302.101
++0.622	300.117	302.101
++0.623	300.117	302.101
++0.624	300.117	302.101
++0.625	300.117	302.101
++0.626	300.117	302.101
++0.627	300.117	302.101
++0.628	300.117	302.101
++0.629	300.117	302.101
++0.63	300.117	302.101
++0.631	300.117	302.101
++0.632	300.117	302.101
++0.633	300.117	302.101
++0.634	300.117	302.101
++0.635	300.117	302.101
++0.636	300.117	302.101
++0.637	300.117	302.101
++0.638	300.117	302.101
++0.639	300.117	302.101
++0.64	300.117	302.101
++0.641	300.117	302.101
++0.642	300.117	302.101
++0.643	300.117	302.101
++0.644	300.117	302.101
++0.645	300.117	302.101
++0.646	300.117	302.101
++0.647	300.117	302.101
++0.648	300.117	302.101
++0.649	300.117	302.101
++0.65	300.117	302.101
++0.651	300.117	302.101
++0.652	300.117	302.101
++0.653	300.117	302.101
++0.654	300.117	302.101
++0.655	300.117	302.101
++0.656	300.117	302.101
++0.657	300.117	302.101
++0.658	300.117	302.101
++0.659	300.117	302.101
++0.66	300.117	302.101
++0.661	300.117	302.101
++0.662	300.117	302.101
++0.663	300.117	302.101
++0.664	300.117	302.101
++0.665	300.117	302.101
++0.666	300.117	302.101
++0.667	300.117	302.101
++0.668	300.117	302.101
++0.669	300.117	302.101
++0.67	300.117	302.101
++0.671	300.117	302.101
++0.672	300.117	302.101
++0.673	300.117	302.101
++0.674	300.117	302.101
++0.675	300.117	302.101
++0.676	300.117	302.101
++0.677	300.117	302.101
++0.678	300.117	302.101
++0.679	300.117	302.101
++0.68	300.117	302.101
++0.681	300.117	302.101
++0.682	300.117	302.101
++0.683	300.117	302.101
++0.684	300.117	302.101
++0.685	300.117	302.101
++0.686	300.117	302.101
++0.687	300.117	302.101
++0.688	300.117	302.101
++0.689	300.117	302.101
++0.69	300.117	302.101
++0.691	300.117	302.101
++0.692	300.117	302.101
++0.693	300.117	302.101
++0.694	300.117	302.101
++0.695	300.118	302.101
++0.696	300.118	302.101
++0.697	300.118	302.101
++0.698	300.118	302.101
++0.699	300.118	302.101
++0.7	300.118	302.101
++0.701	300.118	302.101
++0.702	300.118	302.101
++0.703	300.118	302.101
++0.704	300.118	302.101
++0.705	300.118	302.101
++0.706	300.118	302.101
++0.707	300.118	302.101
++0.708	300.118	302.101
++0.709	300.118	302.101
++0.71	300.118	302.101
++0.711	300.118	302.101
++0.712	300.118	302.101
++0.713	300.118	302.101
++0.714	300.118	302.101
++0.715	300.118	302.101
++0.716	300.118	302.101
++0.717	300.118	302.101
++0.718	300.118	302.101
++0.719	300.118	302.101
++0.72	300.118	302.101
++0.721	300.118	302.101
++0.722	300.118	302.101
++0.723	300.118	302.101
++0.724	300.118	302.101
++0.725	300.118	302.101
++0.726	300.118	302.101
++0.727	300.118	302.101
++0.728	300.118	302.101
++0.729	300.118	302.101
++0.73	300.118	302.101
++0.731	300.118	302.101
++0.732	300.118	302.101
++0.733	300.118	302.101
++0.734	300.118	302.101
++0.735	300.118	302.101
++0.736	300.118	302.101
++0.737	300.118	302.101
++0.738	300.118	302.101
++0.739	300.118	302.101
++0.74	300.118	302.101
++0.741	300.118	302.101
++0.742	300.118	302.101
++0.743	300.118	302.101
++0.744	300.118	302.101
++0.745	300.118	302.101
++0.746	300.118	302.101
++0.747	300.118	302.101
++0.748	300.118	302.101
++0.749	300.118	302.101
++0.75	300.118	302.101
++0.751	300.118	302.101
++0.752	300.118	302.101
++0.753	300.118	302.101
++0.754	300.118	302.101
++0.755	300.118	302.101
++0.756	300.118	302.101
++0.757	300.118	302.101
++0.758	300.118	302.101
++0.759	300.118	302.101
++0.76	300.118	302.101
++0.761	300.118	302.101
++0.762	300.118	302.101
++0.763	300.118	302.101
++0.764	300.118	302.101
++0.765	300.118	302.101
++0.766	300.118	302.101
++0.767	300.118	302.101
++0.768	300.118	302.101
++0.769	300.118	302.101
++0.77	300.118	302.101
++0.771	300.118	302.101
++0.772	300.118	302.101
++0.773	300.118	302.101
++0.774	300.118	302.101
++0.775	300.118	302.101
++0.776	300.118	302.101
++0.777	300.118	302.101
++0.778	300.118	302.101
++0.779	300.118	302.101
++0.78	300.118	302.101
++0.781	300.118	302.101
++0.782	300.118	302.101
++0.783	300.118	302.101
++0.784	300.118	302.101
++0.785	300.118	302.101
++0.786	300.118	302.101
++0.787	300.118	302.101
++0.788	300.118	302.101
++0.789	300.118	302.101
++0.79	300.118	302.101
++0.791	300.118	302.101
++0.792	300.118	302.101
++0.793	300.118	302.101
++0.794	300.118	302.101
++0.795	300.118	302.101
++0.796	300.118	302.101
++0.797	300.118	302.101
++0.798	300.118	302.101
++0.799	300.118	302.101
++0.8	300.118	302.101
++0.801	300.118	302.101
++0.802	300.118	302.101
++0.803	300.118	302.101
++0.804	300.118	302.101
++0.805	300.118	302.101
++0.806	300.118	302.101
++0.807	300.118	302.101
++0.808	300.118	302.101
++0.809	300.118	302.101
++0.81	300.118	302.101
++0.811	300.118	302.101
++0.812	300.118	302.101
++0.813	300.118	302.101
++0.814	300.118	302.101
++0.815	300.118	302.101
++0.816	300.118	302.101
++0.817	300.118	302.101
++0.818	300.118	302.101
++0.819	300.118	302.101
++0.82	300.118	302.101
++0.821	300.118	302.101
++0.822	300.118	302.101
++0.823	300.118	302.101
++0.824	300.118	302.101
++0.825	300.118	302.101
++0.826	300.118	302.101
++0.827	300.118	302.101
++0.828	300.118	302.101
++0.829	300.118	302.101
++0.83	300.118	302.101
++0.831	300.118	302.101
++0.832	300.118	302.101
++0.833	300.118	302.101
++0.834	300.118	302.101
++0.835	300.118	302.101
++0.836	300.118	302.101
++0.837	300.118	302.101
++0.838	300.118	302.101
++0.839	300.118	302.101
++0.84	300.118	302.101
++0.841	300.118	302.101
++0.842	300.118	302.101
++0.843	300.118	302.101
++0.844	300.118	302.101
++0.845	300.118	302.101
++0.846	300.118	302.101
++0.847	300.118	302.101
++0.848	300.118	302.101
++0.849	300.118	302.101
++0.85	300.118	302.101
++0.851	300.118	302.101
++0.852	300.118	302.101
++0.853	300.118	302.101
++0.854	300.118	302.101
++0.855	300.118	302.101
++0.856	300.118	302.101
++0.857	300.118	302.101
++0.858	300.118	302.101
++0.859	300.118	302.101
++0.86	300.118	302.101
++0.861	300.118	302.101
++0.862	300.118	302.101
++0.863	300.118	302.101
++0.864	300.118	302.101
++0.865	300.118	302.101
++0.866	300.118	302.101
++0.867	300.118	302.101
++0.868	300.118	302.101
++0.869	300.118	302.101
++0.87	300.118	302.101
++0.871	300.118	302.101
++0.872	300.118	302.101
++0.873	300.118	302.101
++0.874	300.118	302.101
++0.875	300.118	302.101
++0.876	300.118	302.101
++0.877	300.118	302.101
++0.878	300.118	302.101
++0.879	300.118	302.101
++0.88	300.118	302.101
++0.881	300.118	302.101
++0.882	300.118	302.101
++0.883	300.118	302.101
++0.884	300.118	302.101
++0.885	300.118	302.101
++0.886	300.118	302.101
++0.887	300.118	302.101
++0.888	300.118	302.101
++0.889	300.118	302.101
++0.89	300.118	302.101
++0.891	300.118	302.101
++0.892	300.118	302.101
++0.893	300.118	302.101
++0.894	300.118	302.101
++0.895	300.118	302.101
++0.896	300.118	302.101
++0.897	300.118	302.101
++0.898	300.118	302.101
++0.899	300.118	302.101
++0.9	300.118	302.101
++0.901	300.118	302.101
++0.902	300.118	302.101
++0.903	300.118	302.101
++0.904	300.118	302.101
++0.905	300.118	302.101
++0.906	300.118	302.101
++0.907	300.118	302.101
++0.908	300.118	302.101
++0.909	300.118	302.101
++0.91	300.118	302.101
++0.911	300.118	302.101
++0.912	300.118	302.101
++0.913	300.118	302.101
++0.914	300.118	302.101
++0.915	300.118	302.101
++0.916	300.118	302.101
++0.917	300.118	302.101
++0.918	300.118	302.101
++0.919	300.118	302.101
++0.92	300.118	302.101
++0.921	300.118	302.101
++0.922	300.118	302.101
++0.923	300.118	302.101
++0.924	300.118	302.101
++0.925	300.118	302.101
++0.926	300.118	302.101
++0.927	300.118	302.101
++0.928	300.118	302.101
++0.929	300.118	302.101
++0.93	300.118	302.101
++0.931	300.118	302.101
++0.932	300.118	302.101
++0.933	300.118	302.101
++0.934	300.118	302.101
++0.935	300.118	302.101
++0.936	300.118	302.101
++0.937	300.118	302.101
++0.938	300.118	302.101
++0.939	300.118	302.101
++0.94	300.118	302.101
++0.941	300.118	302.101
++0.942	300.118	302.101
++0.943	300.118	302.101
++0.944	300.118	302.101
++0.945	300.118	302.101
++0.946	300.118	302.101
++0.947	300.118	302.101
++0.948	300.118	302.101
++0.949	300.118	302.101
++0.95	300.118	302.101
++0.951	300.118	302.101
++0.952	300.118	302.101
++0.953	300.118	302.101
++0.954	300.118	302.101
++0.955	300.118	302.101
++0.956	300.118	302.101
++0.957	300.118	302.101
++0.958	300.118	302.101
++0.959	300.118	302.101
++0.96	300.118	302.101
++0.961	300.118	302.101
++0.962	300.118	302.101
++0.963	300.118	302.101
++0.964	300.118	302.101
++0.965	300.118	302.101
++0.966	300.118	302.101
++0.967	300.118	302.101
++0.968	300.118	302.101
++0.969	300.118	302.101
++0.97	300.118	302.101
++0.971	300.118	302.101
++0.972	300.118	302.101
++0.973	300.118	302.101
++0.974	300.118	302.101
++0.975	300.118	302.101
++0.976	300.118	302.101
++0.977	300.118	302.101
++0.978	300.118	302.101
++0.979	300.118	302.101
++0.98	300.118	302.101
++0.981	300.118	302.101
++0.982	300.118	302.101
++0.983	300.118	302.101
++0.984	300.118	302.101
++0.985	300.118	302.101
++0.986	300.118	302.101
++0.987	300.118	302.101
++0.988	300.118	302.101
++0.989	300.118	302.101
++0.99	300.118	302.101
++0.991	300.118	302.101
++0.992	300.118	302.101
++0.993	300.118	302.101
++0.994	300.118	302.101
++0.995	300.118	302.101
++0.996	300.118	302.101
++0.997	300.118	302.101
++0.998	300.118	302.101
++0.999	300.118	302.101
++1	300.118	302.101
+diff --git a/test/initialization/reference/test_single.txt b/test/initialization/reference/test_single.txt
+new file mode 100644
+index 0000000..4f8effc
+--- /dev/null
++++ b/test/initialization/reference/test_single.txt
+@@ -0,0 +1,8 @@
++source[0,0]=7.54867*target[0,0]
++source[1,0]=7.54867*target[1,0]
++source[0,0]=7.54867*target[0,0]
++source[0,1]=0
++source[0,2]=0
++source[1,0]=7.54867*target[1,0]
++source[1,1]=0
++source[1,2]=0
+diff --git a/test/initialization/test.flp b/test/initialization/test.flp
+new file mode 100644
+index 0000000..bb1fb68
+--- /dev/null
++++ b/test/initialization/test.flp
+@@ -0,0 +1,5 @@
++
++HEATER1:
++	position  0,     0 ;
++	dimension 10000, 10000 ;
++	power values 10 ;
+diff --git a/test/initialization/test2.flp b/test/initialization/test2.flp
+new file mode 100644
+index 0000000..aedaeb4
+--- /dev/null
++++ b/test/initialization/test2.flp
+@@ -0,0 +1,5 @@
++
++HEATER1:
++	position  0,     0 ;
++	dimension 10000, 10000 ;
++	power values 10, 10 ;
+diff --git a/test/initialization/test_file.stk b/test/initialization/test_file.stk
+new file mode 100644
+index 0000000..d621c40
+--- /dev/null
++++ b/test/initialization/test_file.stk
+@@ -0,0 +1,33 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 10000 , width  10000 ;
++
++die TOPDIE :
++	source 1000 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 1 ;
++	initial temperature "const.tdata" ;
++    initial sink temperature 300 ;
++
++output:
++	T    ( DIE, 5000,  5000, "test_file_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_file_top.txt",    step );
++	
+diff --git a/test/initialization/test_scalars1.stk b/test/initialization/test_scalars1.stk
+new file mode 100644
+index 0000000..a384616
+--- /dev/null
++++ b/test/initialization/test_scalars1.stk
+@@ -0,0 +1,33 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 10000 , width  10000 ;
++
++die TOPDIE :
++	source 1000 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 1 ;
++	initial temperature 310.0 ;
++	initial sink temperature 320.0 ;
++
++output:
++	T    ( DIE, 5000,  5000, "test_scalars1_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_scalars1_top.txt",    step );
++	
+diff --git a/test/initialization/test_scalars2.stk b/test/initialization/test_scalars2.stk
+new file mode 100644
+index 0000000..c2b4b1b
+--- /dev/null
++++ b/test/initialization/test_scalars2.stk
+@@ -0,0 +1,33 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 10000 , width  10000 ;
++
++die TOPDIE :
++	source 1000 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 1 ;
++	initial temperature 310.0 ;
++	initial sink temperature 300.0 ;
++
++output:
++	T    ( DIE, 5000,  5000, "test_scalars2_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_scalars2_top.txt",    step );
++	
+diff --git a/test/initialization/test_scalars_single.stk b/test/initialization/test_scalars_single.stk
+new file mode 100644
+index 0000000..d0cbbff
+--- /dev/null
++++ b/test/initialization/test_scalars_single.stk
+@@ -0,0 +1,33 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 10000 , width  10000 ;
++
++die TOPDIE :
++	source 1000 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 1 ;
++	initial temperature 300.0 ;
++	initial sink temperature 300.0 ;
++
++output:
++	T    ( DIE, 5000,  5000, "test_scalars_single_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_scalars_single_top.txt",    step );
++	
+diff --git a/test/initialization/test_single.stk b/test/initialization/test_single.stk
+new file mode 100644
+index 0000000..34001df
+--- /dev/null
++++ b/test/initialization/test_single.stk
+@@ -0,0 +1,34 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 10000 , width  10000 ;
++
++die TOPDIE :
++	source 1000 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 1 ;
++	initial temperature 300.0 ;
++
++
++output:
++	T    ( DIE, 5000,  5000, "test_single_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_single_top.txt",    step );
++    Tstack ("test_single.tdata", final );
++	
+diff --git a/test/initialization/test_single.tdata b/test/initialization/test_single.tdata
+new file mode 100644
+index 0000000..8fa40ba
+--- /dev/null
++++ b/test/initialization/test_single.tdata
+@@ -0,0 +1,4 @@
++% Thermal stack data with pluggable heatsink layer
++302.101	300.118
++301.230	300.094
++
+diff --git a/test/initialization/test_split_1.stk b/test/initialization/test_split_1.stk
+new file mode 100644
+index 0000000..34a5bc0
+--- /dev/null
++++ b/test/initialization/test_split_1.stk
+@@ -0,0 +1,37 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 2500  , width  10000 ;
++
++die TOPDIE :
++    layer  500 SILICON ;
++	source 250 SILICON ;
++    layer  250 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 0.01 ;
++	initial temperature 300.0 ;
++
++
++
++output:
++	T    ( DIE, 5000,  5000, "test_split_1_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_split_1_top.txt",    step );
++    Tstack ("test_split_1.tdata", final );
++	
+diff --git a/test/initialization/test_split_1.tdata b/test/initialization/test_split_1.tdata
+new file mode 100644
+index 0000000..19c7aaa
+--- /dev/null
++++ b/test/initialization/test_split_1.tdata
+@@ -0,0 +1,6 @@
++% Thermal stack data with pluggable heatsink layer
++300.464 300.464 300.464 300.464	300.002 300.002 300.002 300.002
++300.501 300.501 300.501 300.501	300.002 300.002 300.002 300.002
++300.283 300.283 300.283 300.283	300.001 300.001 300.001 300.001
++300.103 300.103 300.103 300.103	300.001 300.001 300.001 300.001
++
+diff --git a/test/initialization/test_split_2.stk b/test/initialization/test_split_2.stk
+new file mode 100644
+index 0000000..bb940bf
+--- /dev/null
++++ b/test/initialization/test_split_2.stk
+@@ -0,0 +1,37 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 2500  , width  10000 ;
++
++die TOPDIE :
++    layer  500 SILICON ;
++	source 250 SILICON ;
++    layer  250 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test.flp" ;
++
++solver:
++	transient step 0.001, slot 0.01 ;
++    initial temperature "test_split_1.tdata" ;
++    initial sink temperature 300.0 ;
++
++
++output:
++	T    ( DIE, 5000,  5000, "test_split_2_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_split_2_top.txt",    step );
++    Tstack ("test_split_2.tdata", final );
++	
+diff --git a/test/initialization/test_split_2.tdata b/test/initialization/test_split_2.tdata
+new file mode 100644
+index 0000000..7a854ad
+--- /dev/null
++++ b/test/initialization/test_split_2.tdata
+@@ -0,0 +1,6 @@
++% Thermal stack data with pluggable heatsink layer
++300.696 300.696 300.696 300.696	300.005 300.005 300.005 300.005
++300.720 300.720 300.720 300.720	300.005 300.005 300.005 300.005
++300.477 300.477 300.477 300.477	300.004 300.004 300.004 300.004
++300.256 300.256 300.256 300.256	300.003 300.003 300.003 300.003
++
+diff --git a/test/initialization/test_split_both.stk b/test/initialization/test_split_both.stk
+new file mode 100644
+index 0000000..9542ca4
+--- /dev/null
++++ b/test/initialization/test_split_both.stk
+@@ -0,0 +1,37 @@
++
++material SILICON :
++	thermal conductivity     1.30e-04 ;
++	volumetric heat capacity 1.628e-12 ;
++
++material COPPER :
++	thermal conductivity     4.01e-04 ;
++	volumetric heat capacity 3.37e-12 ;
++
++top pluggable heat sink :
++	spreader length 10000 , width 20000 , height 1000 ;
++	material COPPER ;
++	plugin "../../heatsink_plugin/loaders/FMI/fmi_loader.so", "Test.TestHeatsink_Interface3DICE 0.0 0.0" ;
++
++dimensions :
++	chip length 10000 , width  20000 ;
++	cell length 2500  , width  10000 ;
++
++die TOPDIE :
++    layer  500 SILICON ;
++	source 250 SILICON ;
++    layer  250 SILICON ;
++
++stack:
++	die     DIE     TOPDIE    floorplan "test2.flp" ;
++
++solver:
++	transient step 0.001, slot 0.01 ;
++	initial temperature 300.0 ;
++      
++
++
++output:
++	T    ( DIE, 5000,  5000, "test_split_both_bottom.txt", step );
++	T    ( DIE, 5000, 15000, "test_split_both_top.txt",    step );
++    Tstack ("test_split_both.tdata", slot );
++	
+diff --git a/test/initialization/test_split_both.tdata b/test/initialization/test_split_both.tdata
+new file mode 100644
+index 0000000..302ddfc
+--- /dev/null
++++ b/test/initialization/test_split_both.tdata
+@@ -0,0 +1,11 @@
++% Thermal stack data with pluggable heatsink layer
++300.464 300.464 300.464 300.464	300.002 300.002 300.002 300.002
++300.501 300.501 300.501 300.501	300.002 300.002 300.002 300.002
++300.283 300.283 300.283 300.283	300.001 300.001 300.001 300.001
++300.103 300.103 300.103 300.103	300.001 300.001 300.001 300.001
++
++300.696 300.696 300.696 300.696	300.005 300.005 300.005 300.005
++300.719 300.719 300.719 300.719	300.004 300.004 300.004 300.004
++300.477 300.477 300.477 300.477	300.004 300.004 300.004 300.004
++300.256 300.256 300.256 300.256	300.003 300.003 300.003 300.003
++

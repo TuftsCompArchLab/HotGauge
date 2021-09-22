@@ -1,0 +1,31 @@
+#!/bin/bash
+# Runs an instance of $2 in $1 with remaining arguments as inputs to the command
+
+script=`basename $0`
+script_dir=`dirname $0`
+
+run_dir=$1
+executable=$2
+executable_basename=`basename $executable`
+shift 2
+arguments=$@
+
+cd $run_dir
+(
+    echo "Job-script: $script"
+    echo "Job-script-location: $script_dir"
+    echo "Run-directory: $run_dir"
+    echo "Runtime: `date`"
+    echo "Command: $executable $arguments"
+    echo ""
+
+    mkdir -p logs
+
+    # Run the command
+    eval $executable $arguments 2> logs/$executable_basename.stderr 1> logs/$executable_basename.stdout
+
+    echo ""
+    echo "$executable_basename exited with status $?"
+    echo "Endtime: `date`"
+    echo ""
+) > $script.$executable_basename.log

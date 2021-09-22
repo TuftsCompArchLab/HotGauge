@@ -1,0 +1,100 @@
+/*********************** Materials ***********************/
+material SILICON :
+   thermal conductivity     1.20e-4 ;
+   volumetric heat capacity 1.651e-12 ;
+
+material SOLDER_TIM :
+   thermal conductivity     0.25e-4 ;
+   volumetric heat capacity 1.628e-12 ; // TODO: determine appropriate value
+
+material COPPER :
+   thermal conductivity     3.9e-4 ;
+   volumetric heat capacity 3.376e-12 ;
+
+material THERMAL_GREASE :
+   thermal conductivity     0.04e-4 ;
+   volumetric heat capacity 3.376e-12 ; // TODO: determine appropriate value
+
+material HEATSINK_METAL :
+   thermal conductivity     3.0e-4 ;
+   volumetric heat capacity 3.376e-12 ; // TODO: determine appropriate value
+
+/*
+BEOL could be used in the future
+material BEOL :
+   thermal conductivity     2.25e-6 ;
+   volumetric heat capacity 2.175e-12 ;
+*/
+
+/*********************** Heat Sink ***********************/
+top heat sink :
+   /* REMOVED BECUASE THEY LIE
+   // Heat sink dimensions :
+      // 500000um-600000um for desktop
+      // 300000um for mobile
+      // 176000um (estimate) for single core
+   sink height 2e3, area 30000e6, material HEATSINK_METAL ;
+   spread height 3e3 , area 20000e6,   material COPPER ;
+   */
+   heat transfer coefficient 1.0e-7 ; // TODO: Tune this coefficient for desktop
+   // heat transfer coefficient 1.0e-7 ; // TODO: Tune this coefficient for mobile
+   temperature 303.15 ; // Effective ambient for desktop
+   // temperature 314.15 ; // Effective ambient for mobile
+
+/*********************** Liquid‐cooled cavity ***********************/
+// N/A
+
+/*********************** Dimensions ***********************/
+dimensions :
+   /*
+      Simple Skylake: 
+         Floorplan Height: 1.4224349 mm
+         Floorplan Width: 2.31580897 mm
+   */
+   chip length {flp_width}, width {flp_height} ;
+   cell length 50, width 50; // TODO: Is this reasonable?
+
+/*********************** Layers ***********************/
+layer SINK_LAYER :
+   height 2e3 ;
+   material HEATSINK_METAL ;
+   
+layer GREASE_LAYER :
+   height 30 ;
+   material THERMAL_GREASE ;
+
+layer HSP_LAYER :
+   height 3e3 ;
+   material COPPER ;
+
+layer SOLDER_LAYER :
+   height 200 ;
+   material SOLDER_TIM ;
+
+/*********************** Dies ***********************/
+die IC :
+   layer  100 SILICON ; // 400
+   layer  80  SILICON ; // 300
+   layer  80  SILICON ; // 220
+   layer  60  SILICON ; // 140
+   layer  40  SILICON ; // 80
+   source 20  SILICON ; // 40
+   layer  20  SILICON ; // 20
+
+/*********************** Stack ***********************/
+stack:
+   layer SINK SINK_LAYER ;
+   layer GREASE GREASE_LAYER ;
+   layer HSP HSP_LAYER ;
+   layer SOLDER SOLDER_LAYER ;
+   die PROCESSOR_DIE IC floorplan "{flp_file}";
+   // layer    CONN_TO_PCB    BEOL ;
+
+/*********************** Analysis options ***********************/
+solver :
+{solver_config}
+
+/*********************** Output instructions ***********************/
+output :
+   // Specifying a die layer like PROCESSOR_DIE selects the `source` layer of the die
+{output_list}

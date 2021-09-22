@@ -1,0 +1,18 @@
+-e ./HotGauge/
+Click==6 # Click version 7.* converts click groups to use - instead of _ as a seperator
+cycler
+enum34
+joypy
+kiwisolver
+matplotlib
+numpy
+pandas
+Pillow
+Pint
+pyparsing
+python-dateutil
+pytz
+scipy
+seaborn
+six
+tqdm
