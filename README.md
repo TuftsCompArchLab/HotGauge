@@ -7,13 +7,26 @@ A framework for characterizing hotspots in next-generation processors
 This codebase requires python 3 and was developed using python 3.9
 
 # Installing System Dependencies
-Follow the instructions below to install the system dependencies
+Follow the instructions below to install the system dependencies. You can run HotGauge without installing these dependencies system-wide by following the ddockerization instructions
 
 1) dnf -y install dnf-plugins-core and epel-release
 1) dnf config-manager --set-enabled crb
 1) dnf config-manager --add-repo https://build.openmodelica.org/linux/rpm/el9/omc.repo
 1) Install the packages from the next section
 1) chmod -R a+rX /opt/openmodelica-nightly/share/omc/runtime/c/fmi/buildproject/
+
+# Dockerization Instructions
+Make sure Docker is installed and running.
+
+From the HotGauge directory, build the Docker image:
+
+docker build -t my-project .
+
+Then start a container from the image:
+
+docker run --rm -it HotGauge_docker bash
+
+Contnue with the build instructions in the Initial Setup portion of the README
 
 # System Dependencies (RHEL 9)
 
